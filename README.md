@@ -6,8 +6,6 @@ Stack: Bun 1.x, TypeScript estrito, NestJS, MikroORM, PostgreSQL, AWS SQS (Local
 
 As decisões de arquitetura, o schema e as limitações estão em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-> Status: etapas 1 (fundações) e 2 (domínio puro, 243 testes unitários) concluídas. Schema, use case, API e mensageria ainda não foram implementados.
-
 ## Pré-requisitos
 
 - [Bun](https://bun.sh) 1.x
