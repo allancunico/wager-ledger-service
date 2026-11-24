@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wager
+      POSTGRES_PASSWORD: wager
+      POSTGRES_DB: wager
+    ports:
+      - "5432:5432"
+    # max_connections folgado: testes de concorrência abrem várias conexões e vários bancos
+    command: ["postgres", "-c", "max_connections=300"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wager -d wager"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  localstack:
+    image: localstack/localstack:latest
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN}
+    ports:
+      - "4566:4566"
+    volumes:
+      # Script de inicialização: cria as filas quando o LocalStack fica pronto
+      - ./docker/localstack-init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs list-queues >/dev/null 2>&1 && test -f /tmp/queues-ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  # Instâncias da aplicação. Todas contra o mesmo Postgres e as mesmas filas.
+  # Uso: docker compose --profile app up --scale app=3
+  app:
+    profiles: ["app"]
+    build: .
+    environment:
+      ROLES: api,consumer,workers
+      PORT: "3000"
+      DATABASE_URL: postgres://wager:wager@postgres:5432/wager
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    ports:
+      - "3000-3010:3000"
+
+volumes:
+  pgdata:
