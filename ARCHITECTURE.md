@@ -306,17 +306,17 @@ Eu havia afirmado que um `findOne` com lock sobre uma entidade já carregada dev
 
 - **Docker Compose e LocalStack não foram executados.** O `docker-compose.yml` foi validado só por sintaxe (`docker compose config`) e o script `docker/localstack-init/01-create-queues.sh` só por `bash -n`. A criação das filas, a redrive policy da DLQ e o healthcheck do LocalStack ainda não foram exercitados de verdade. Isso entra no primeiro `bun run infra:up` na sua máquina.
 - **SQS não foi tocado.** O `@aws-sdk/client-sqs` está instalado, mas nenhuma chamada foi feita.
-- **Migrator do MikroORM.** O spike criou as tabelas por SQL direto. O `migrate.ts` referenciado nos scripts ainda não existe (etapa 3).
+- **Migrations da etapa 3.** O spike inicial criou tabelas por SQL direto; depois foram adicionadas migrations versionadas do MikroORM. A seção 13 registra o schema atual e o que ainda precisa de validação PostgreSQL neste clone.
 - **Dockerfile.** Escrito, não construído.
 
 ## 12. Domínio (etapa 2): decisões de implementação
 
-Código em `src/domain`, sem importar ORM, Nest, SQS ou nada de infraestrutura (as únicas dependências externas são `decimal.js` e `node:crypto`). O domínio nunca lê o relógio: recebe o instante como parâmetro (`Clock` e `FixedClock` ficam para a aplicação e os testes). Os testes ficam em `test/unit` (243 casos).
+Código em `src/domain`, sem importar ORM, Nest, SQS ou nada de infraestrutura (as únicas dependências externas são `decimal.js` e `node:crypto`). O domínio nunca lê o relógio: recebe o instante como parâmetro (`Clock` e `FixedClock` ficam para a aplicação e os testes). Os testes ficam em `test/unit` (incluindo testes dos mappers).
 
 ### 12.1 Interpretações adicionais
 
 1. **`Money.from` aceita 0, 1 ou 2 casas e normaliza para 2** (`"25"` vira `"25.00"`). Rejeita mais de 2 casas, sinal, espaços, vírgula, notação científica, `NaN`, `Infinity` e mais de 17 dígitos inteiros (o limite de `NUMERIC(19,2)`, para o erro surgir no domínio como 400 e não como falha do banco). Só `from` rejeita negativos; resultados de `subtract` e `negate` podem ser negativos para cálculo.
-2. **`WIN` e `LOSS` podem referenciar uma `BET`** (referência opcional). A seção 3.4 só tratava de `WIN`; estendi a `LOSS` porque um resultado de rodada que cita a aposta é o uso natural, e rejeitar isso seria hostil ao provedor. Se a referência for informada e ainda não existir, a transação espera como as demais. `BET` não aceita referência.
+2. **`WIN` pode referenciar uma `BET`** (referência opcional). O código também permite que `LOSS` referencie uma `BET`, como extensão provisória ainda não confirmada; se essa referência for informada e ainda não existir, a transação espera como as demais. `BET` não aceita referência.
 3. **Uma transação não pode referenciar a si mesma**, e todo identificador do provedor tem no máximo 255 caracteres (limite das colunas `varchar(255)`).
 4. **`OPENING`** usa `providerId = 'system'` e `idempotencyKey = externalTransactionId = 'opening:{walletId}'`. Nasce `PROCESSED`.
 
@@ -359,8 +359,29 @@ As verificações 3.2 a 3.4 só usam campos imutáveis, então valem mesmo com a
 
 Além de passarem, os testes foram confrontados com 9 mutações deliberadas no código (saldo nunca checado, `version` sem incremento, reversão dupla permitida, valor da reversão não conferido, mesmo código para saldo insuficiente e overdraw, fronteira do TTL, hash sem moeda, limite de magnitude, ledger desbalanceado aceito). Todas foram detectadas por pelo menos um teste. Isso mostra que os testes cobrem essas regras, e não que cobrem todo o domínio.
 
-### 12.6 O que a etapa 2 não cobre
+### 12.6 Limites da etapa 2
 
 - O domínio só foi exercitado em memória. A atomicidade, os locks e as constraints do schema entram nas etapas 3 a 5.
-- Os mappers entre o domínio e os registros de persistência (decisão 1) ainda não existem.
+- Os mappers entre o domínio e os registros de persistência foram adicionados na etapa 3; os testes unitários cobrem round-trip, não persistência real.
 - O resultado de uma transação já decidida em replay (200, 422, 202) é montado pela camada de aplicação, ainda por escrever.
+
+## 13. Persistência (etapa 3): implementação no clone atual
+
+O clone contém cinco migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
+
+### 13.1 Garantias definidas no schema
+
+- `wallets`: unicidade de player/moeda, saldo não negativo, moeda em formato de três letras maiúsculas, versão positiva e trigger que só permite incrementar a versão quando o saldo muda.
+- `wager_transactions`: chaves únicas por provedor, valores positivos, tipos e estados enumerados, exigência de referência para `REFUND`/`ROLLBACK`, reversão única quando processada, tentativas não negativas e trigger que bloqueia atualização após estado terminal.
+- `wallet_ledger_entries`: sequência de identidade para paginação, unicidade por wallet/transação, aritmética e saldos não negativos, cadeia serializada pelo lock da wallet e trigger de imutabilidade para `UPDATE`, `DELETE` e `TRUNCATE`.
+- `inbox_messages`: chave primária composta por consumidor e mensagem.
+- `outbox_messages`: payload JSONB vinculado ao `eventId`, índice parcial para mensagens pendentes, tentativas não negativas e bloqueio de exclusão enquanto pendente.
+- Triggers de constraint adiados até o commit verificam que o saldo da wallet coincide com a última linha do ledger e que transações processadas com efeito de saldo têm exatamente um lançamento compatível.
+
+Valores monetários são `NUMERIC(19,2)` hidratados pelo driver como strings. Os registros e mappers não convertem dinheiro para `number`; a coluna interna `seq` do ledger não faz parte do domínio nem do mapper.
+
+### 13.2 Verificação disponível
+
+Os testes unitários dos mappers cobrem os cinco registros, precisão decimal, `null`/`undefined`, snapshot/failure code e timestamps. Os testes de integração criam um banco PostgreSQL temporário, aplicam e revertem migrations e exercitam constraints de wallet, transação, ledger, inbox e outbox.
+
+Validação em 25/11/2026: `bun run test:integration` executou 11 testes contra PostgreSQL no Docker, cobrindo migrations reversíveis e constraints de wallet, transação, ledger, inbox e outbox. A suíte cria bancos temporários `wager_test_*` e os remove ao final.

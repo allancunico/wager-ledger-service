@@ -19,6 +19,8 @@ cp .env.example .env
 bun run infra:up        # sobe PostgreSQL e LocalStack (cria as 3 filas SQS)
 ```
 
+O PostgreSQL do Compose é publicado em `localhost:5433` para evitar conflito com instalações locais que já usam a porta `5432`. A URL padrão está em `.env.example`.
+
 ## Comandos
 
 | Comando | O que faz |
@@ -30,12 +32,16 @@ bun run infra:up        # sobe PostgreSQL e LocalStack (cria as 3 filas SQS)
 | `bun run typecheck` | `tsc --noEmit` |
 | `bun run spike` | spike da etapa 1 (precisa de um PostgreSQL acessível, ver abaixo) |
 | `bun run infra:up` / `infra:down` | sobe / derruba a infra local |
-| `bun run test:unit` | testes de unidade do domínio (não precisam de banco nem de Docker) |
-| `bun run test:integration` | testes de integração (etapa 3 em diante) |
+| `bun run test:unit` | testes unitários do domínio e round-trip dos mappers (não precisam de banco nem de Docker) |
+| `bun run test:integration` | testes de migrations e constraints em PostgreSQL (criam e removem um banco temporário) |
 | `bun run test:concurrency` | testes de concorrência (etapa 5 em diante) |
-| `bun run migrate:up` / `migrate:down` | migrations (etapa 3) |
+| `bun run migrate:up` | aplica as migrations |
+| `bun run migrate:down` | reverte a migration mais recente |
+| `bun run migrate:down -- --all` | reverte todas as migrations |
 
-Os scripts de teste, de migration e `test:load` ainda apontam para arquivos que serão criados nas próximas etapas.
+Os testes de integração usam `TEST_DATABASE_ADMIN_URL` se definida; caso contrário, usam `DATABASE_URL` como conexão administrativa para criar um banco isolado. A role precisa poder criar e remover bancos. O teste de integração ainda requer PostgreSQL acessível.
+
+O caso de uso financeiro, a API, os workers e os testes de concorrência pertencem às próximas etapas.
 
 ## Papéis do processo
 
