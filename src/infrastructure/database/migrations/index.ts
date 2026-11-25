@@ -3,6 +3,7 @@ import { Migration20261124000002CreateWagerTransactions } from './Migration20261
 import { Migration20261124000003CreateWalletLedgerEntries } from './Migration20261124000003CreateWalletLedgerEntries';
 import { Migration20261124000004CreateMessaging } from './Migration20261124000004CreateMessaging';
 import { Migration20261124000005EnforceLedgerInvariants } from './Migration20261124000005EnforceLedgerInvariants';
+import { Migration20261125000006AllowReferencedWinLoss } from './Migration20261125000006AllowReferencedWinLoss';
 
 export const migrationsList = [
   Migration20261124000001CreateWallets,
@@ -10,4 +11,5 @@ export const migrationsList = [
   Migration20261124000003CreateWalletLedgerEntries,
   Migration20261124000004CreateMessaging,
   Migration20261124000005EnforceLedgerInvariants,
+  Migration20261125000006AllowReferencedWinLoss,
 ];

@@ -32,6 +32,7 @@ export async function createTestDatabase() {
 
   return {
     orm,
+    databaseUrl: databaseUrl.toString(),
     async close() {
       await orm.close(true);
       await dropTestDatabase(adminUrl.toString(), databaseName);

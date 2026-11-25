@@ -49,11 +49,12 @@ Padrão: todos os papéis. No Compose rodam 3 ou mais instâncias, todas contra 
 Sequência dentro de uma transação SQL:
 
 1. Registrar no inbox (somente entrada SQS).
-2. Inserir a transação com `ON CONFLICT DO NOTHING` na unicidade de idempotência. Se já existe: mesmo `payloadHash` é replay, diferente é conflito.
-3. Travar a wallet (`FOR UPDATE`).
-4. Carregar a referência (se houver) e validar as regras no domínio.
-5. Atualizar saldo e `version`, inserir ledger, atualizar o status da transação e inserir na outbox.
-6. Commit. Ack e publicação só depois.
+2. Consultar a chave de idempotência e o id externo para o caminho rápido de replay/conflito.
+3. Travar a wallet (`FOR UPDATE`) antes de inserir a transação. A FK da transação adquire `KEY SHARE`; inserir primeiro e depois converter para `FOR UPDATE` pode provocar deadlock entre requisições da mesma wallet.
+4. Inserir a transação com `ON CONFLICT DO NOTHING`. Se uma corrida venceu a unicidade: mesmo `payloadHash` é replay, diferente é conflito.
+5. Carregar a referência (se houver) e validar as regras no domínio.
+6. Atualizar saldo e `version`, inserir ledger, atualizar o status da transação e inserir na outbox.
+7. Commit. Ack e publicação só depois.
 
 Pontos:
 
@@ -176,7 +177,7 @@ Desenho que seria adotado (somente documentado):
 - Escopos: provedores submetem e consultam só as próprias transações. Criação de wallets é escopo administrativo.
 - Regra central: o `providerId` do corpo deve ser igual ao da identidade autenticada. A checagem mora no adaptador e no guard, o domínio não conhece autenticação.
 
-Limitação: sem autenticação, qualquer cliente que alcance a API pode submeter transações em nome de qualquer provedor.
+Limitação: sem autenticação, qualquer cliente que alcance a API pode submeter transações em nome de qualquer provedor. O guard global delega a um `ProviderIdentityPort`, com adaptador no-op enquanto a autenticação estiver desligada.
 
 ### 3.10 Eventos da outbox
 
@@ -262,6 +263,8 @@ Migrations versionadas e reversíveis (Migrator do MikroORM), com SQL escrito à
 | 3 | 9 e 10 | observabilidade, testes multi-instância e de crash, docs finais |
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
+
+Estado do clone: as etapas 1 a 4 estão implementadas; as etapas 5 a 10 permanecem no plano.
 
 ## 10. Limitações conhecidas
 
@@ -367,7 +370,7 @@ Além de passarem, os testes foram confrontados com 9 mutações deliberadas no 
 
 ## 13. Persistência (etapa 3): implementação no clone atual
 
-O clone contém cinco migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
+O clone contém seis migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
 
 ### 13.1 Garantias definidas no schema
 
@@ -384,4 +387,13 @@ Valores monetários são `NUMERIC(19,2)` hidratados pelo driver como strings. Os
 
 Os testes unitários dos mappers cobrem os cinco registros, precisão decimal, `null`/`undefined`, snapshot/failure code e timestamps. Os testes de integração criam um banco PostgreSQL temporário, aplicam e revertem migrations e exercitam constraints de wallet, transação, ledger, inbox e outbox.
 
-Validação em 25/11/2026: `bun run test:integration` executou 11 testes contra PostgreSQL no Docker, cobrindo migrations reversíveis e constraints de wallet, transação, ledger, inbox e outbox. A suíte cria bancos temporários `wager_test_*` e os remove ao final.
+Validação em 25/11/2026: `bun run test:integration` executou migrations, constraints e casos de uso contra PostgreSQL no Docker; a API HTTP também recebeu requisições reais em teste. A suíte cria bancos temporários `wager_test_*` e os remove ao final.
+
+## 14. Aplicação e API HTTP (etapa 4)
+
+- `POST /wallets` cria uma wallet e, quando o saldo inicial é positivo, grava `OPENING`, ledger e eventos de outbox na mesma transação.
+- `POST /transactions` exige `Idempotency-Key`, valida DTO com Zod e processa a transação sob lock da wallet. `PROCESSED`, `PENDING_REFERENCE` e `REJECTED` respondem respectivamente 201/200 em replay, 202 e 422.
+- Consultas: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`.
+- `GET /health/live` não acessa dependências; `GET /health/ready` confirma conexão com PostgreSQL.
+- Erros seguem `application/problem+json`, incluem `code`, `message` e `retryable`; lock timeout e deadlock viram 503 com `Retry-After`.
+- As migrations são aplicadas explicitamente com `bun run migrate:up` antes de iniciar a API. O guard de identidade está configurado com adaptador no-op.

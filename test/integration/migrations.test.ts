@@ -24,19 +24,19 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
     const migrator = getOrm().migrator;
     const executed = await migrator.getStorage().executed();
     expect(await migrator.getPending()).toHaveLength(0);
-    expect(executed).toHaveLength(5);
-    expect(new Set(executed).size).toBe(5);
+    expect(executed).toHaveLength(6);
+    expect(new Set(executed).size).toBe(6);
     expect(executed).toEqual([...executed].sort());
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(5);
+    expect(await migrator.getStorage().executed()).toHaveLength(6);
   });
 
   test('down reverts one migration and down to zero removes project schema objects', async () => {
     const migrator = getOrm().migrator;
     await migrator.down();
-    expect(await migrator.getStorage().executed()).toHaveLength(4);
-    await migrator.up();
     expect(await migrator.getStorage().executed()).toHaveLength(5);
+    await migrator.up();
+    expect(await migrator.getStorage().executed()).toHaveLength(6);
 
     await migrator.down({ to: 0 });
     const tables = await getOrm()
@@ -55,6 +55,6 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
     expect(await migrator.getStorage().executed()).toHaveLength(0);
 
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(5);
+    expect(await migrator.getStorage().executed()).toHaveLength(6);
   });
 });

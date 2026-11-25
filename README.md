@@ -41,7 +41,37 @@ O PostgreSQL do Compose é publicado em `localhost:5433` para evitar conflito co
 
 Os testes de integração usam `TEST_DATABASE_ADMIN_URL` se definida; caso contrário, usam `DATABASE_URL` como conexão administrativa para criar um banco isolado. A role precisa poder criar e remover bancos. O teste de integração ainda requer PostgreSQL acessível.
 
-O caso de uso financeiro, a API, os workers e os testes de concorrência pertencem às próximas etapas.
+## API HTTP (etapa 4)
+
+Antes da primeira execução, aplique as migrations:
+
+```bash
+bun run migrate:up
+bun run start
+```
+
+Crie uma wallet com saldo inicial exato (o valor é sempre string decimal):
+
+```http
+POST /wallets
+Content-Type: application/json
+
+{"playerId":"<uuid>","initialBalance":{"amount":"100.00","currency":"BRL"}}
+```
+
+Submeta uma transação com `Idempotency-Key`:
+
+```http
+POST /transactions
+Content-Type: application/json
+Idempotency-Key: provedor-123
+
+{"providerId":"provedor-a","externalTransactionId":"ext-123","playerId":"<uuid>","walletId":"<uuid>","roundId":"rodada-1","gameId":"jogo-1","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}
+```
+
+Consultas disponíveis: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`. Erros usam `application/problem+json`. A autenticação está desligada pelo adaptador no-op.
+
+Os workers SQS e os testes de concorrência multi-instância pertencem às etapas seguintes.
 
 ## Papéis do processo
 
