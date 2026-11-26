@@ -308,7 +308,7 @@ describe('evaluate: ROLLBACK', () => {
     ).toEqual(reject(FailureCode.ReferenceKindNotAllowed));
   });
 
-  test('referência já revertida (por REFUND ou ROLLBACK) → REFERENCE_ALREADY_REVERSED', () => {
+  test('referência já revertida pelo mesmo tipo → REFERENCE_ALREADY_REVERSED', () => {
     expect(
       evaluate({
         transaction: rollback(),
@@ -478,7 +478,7 @@ class Harness {
         (other) =>
           other.status === S.Processed &&
           other.referenceTransactionId === reference.id &&
-          (other.kind === Refund || other.kind === Rollback),
+          other.kind === tx.kind,
       );
     const outcome = processTransaction({
       transaction: tx,
@@ -597,7 +597,7 @@ describe('processTransaction: aplicação do resultado', () => {
     expect(h.wallet.balance.amount).toBe('100.00');
   });
 
-  test('uma referência só é revertida uma vez, por qualquer tipo de reversão (interpretação estrita da regra 4)', () => {
+  test('uma referência admite um REFUND e um ROLLBACK, mas não dois do mesmo tipo', () => {
     const h = new Harness(makeWallet('100.00'));
     h.submit(makeTx({ kind: Bet, externalTransactionId: REF, money: brl('30.00') }));
     const refund = makeTx({
@@ -615,14 +615,21 @@ describe('processTransaction: aplicação do resultado', () => {
       referenceExternalTransactionId: REF,
       money: brl('30.00'),
     });
+    const secondRollback = makeTx({
+      kind: Rollback,
+      referenceExternalTransactionId: REF,
+      money: brl('30.00'),
+    });
     h.submit(refund);
     h.submit(secondRefund);
     h.submit(rollback);
+    h.submit(secondRollback);
 
     expect(refund.status).toBe(S.Processed);
     expect(secondRefund.failureCode).toBe(FailureCode.ReferenceAlreadyReversed);
-    expect(rollback.failureCode).toBe(FailureCode.ReferenceAlreadyReversed);
-    expect(h.wallet.balance.amount).toBe('100.00'); // devolvido uma única vez
+    expect(rollback.status).toBe(S.Processed);
+    expect(secondRollback.failureCode).toBe(FailureCode.ReferenceAlreadyReversed);
+    expect(h.wallet.balance.amount).toBe('130.00'); // um processamento para cada tipo de reversão
   });
 
   test('um REFUND já processado pode ser revertido por ROLLBACK', () => {

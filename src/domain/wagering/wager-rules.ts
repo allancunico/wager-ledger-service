@@ -33,7 +33,7 @@ export interface EvaluationInput {
    * `undefined` quando não existe (ainda) ou quando a transação não tem referência.
    */
   reference?: WagerTransaction;
-  /** Já existe reversão `PROCESSED` desta referência (`REFUND` ou `ROLLBACK`). */
+  /** Já existe reversão `PROCESSED` desta referência do mesmo tipo desta transação. */
   referenceAlreadyReversed: boolean;
 }
 

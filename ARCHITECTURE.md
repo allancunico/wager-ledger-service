@@ -67,7 +67,7 @@ Pontos:
 
 ### 3.4 Interpretação da regra 4 (reversões)
 
-Cada transação só pode ser revertida **uma vez no total**, por qualquer tipo de reversão. Índice único parcial sobre reversões `PROCESSED`. Uma reversão rejeitada não bloqueia uma tentativa válida depois. Uma `BET` reembolsada não aceita `ROLLBACK`, mas o próprio `REFUND` pode ser revertido por `ROLLBACK`.
+Cada referência pode ter no máximo uma reversão `PROCESSED` de cada tipo: um `REFUND` e um `ROLLBACK` podem coexistir, mas um segundo `REFUND` ou segundo `ROLLBACK` para a mesma referência é rejeitado. O índice único parcial usa `(reference_transaction_id, kind)`. Uma reversão rejeitada não consome a vaga daquele tipo.
 
 Outras interpretações:
 
@@ -207,7 +207,7 @@ Tabelas: `wallets`, `wager_transactions`, `wallet_ledger_entries`, `inbox_messag
 | Moeda válida | `CHECK (currency ~ '^[A-Z]{3}$')` |
 | Idempotência por provedor | `UNIQUE (provider_id, idempotency_key)` |
 | Mesma transação do provedor sob outra key | `UNIQUE (provider_id, external_transaction_id)` |
-| Reversão única por referência | índice único parcial em `reference_transaction_id` para reversões `PROCESSED` |
+| Uma reversão processada de cada tipo por referência | índice único parcial em `(reference_transaction_id, kind)` para `REFUND`/`ROLLBACK` `PROCESSED` |
 | Reversão exige referência | `CHECK` por `kind` |
 | Um lançamento por transação e wallet | `UNIQUE (wallet_id, transaction_id)` |
 | Ledger imutável | trigger que bloqueia `UPDATE`, `DELETE` e `TRUNCATE` |
@@ -323,7 +323,7 @@ Código em `src/domain`, sem importar ORM, Nest, SQS ou nada de infraestrutura (
 ### 12.1 Interpretações adicionais
 
 1. **`Money.from` aceita 0, 1 ou 2 casas e normaliza para 2** (`"25"` vira `"25.00"`). Rejeita mais de 2 casas, sinal, espaços, vírgula, notação científica, `NaN`, `Infinity` e mais de 17 dígitos inteiros (o limite de `NUMERIC(19,2)`, para o erro surgir no domínio como 400 e não como falha do banco). Só `from` rejeita negativos; resultados de `subtract` e `negate` podem ser negativos para cálculo.
-2. **`WIN` pode referenciar uma `BET`** (referência opcional). O código também permite que `LOSS` referencie uma `BET`, como extensão provisória ainda não confirmada; se essa referência for informada e ainda não existir, a transação espera como as demais. `BET` não aceita referência.
+2. **`WIN` pode referenciar uma `BET`** (referência opcional). `LOSS` não aceita referência: apenas registra o resultado da rodada sem efeito no saldo. `BET` também não aceita referência.
 3. **Uma transação não pode referenciar a si mesma**, e todo identificador do provedor tem no máximo 255 caracteres (limite das colunas `varchar(255)`).
 4. **`OPENING`** usa `providerId = 'system'` e `idempotencyKey = externalTransactionId = 'opening:{walletId}'`. Nasce `PROCESSED`.
 
@@ -364,7 +364,7 @@ As verificações 3.2 a 3.4 só usam campos imutáveis, então valem mesmo com a
 
 ### 12.5 Como os testes foram validados
 
-Além de passarem, os testes foram confrontados com 9 mutações deliberadas no código (saldo nunca checado, `version` sem incremento, reversão dupla permitida, valor da reversão não conferido, mesmo código para saldo insuficiente e overdraw, fronteira do TTL, hash sem moeda, limite de magnitude, ledger desbalanceado aceito). Todas foram detectadas por pelo menos um teste. Isso mostra que os testes cobrem essas regras, e não que cobrem todo o domínio.
+Além de passarem, os testes foram confrontados com 9 mutações deliberadas no código (saldo nunca checado, `version` sem incremento, duplicata da mesma reversão permitida, valor da reversão não conferido, mesmo código para saldo insuficiente e overdraw, fronteira do TTL, hash sem moeda, limite de magnitude, ledger desbalanceado aceito). Todas foram detectadas por pelo menos um teste. Isso mostra que os testes cobrem essas regras, e não que cobrem todo o domínio.
 
 ### 12.6 Limites da etapa 2
 
@@ -374,12 +374,12 @@ Além de passarem, os testes foram confrontados com 9 mutações deliberadas no 
 
 ## 13. Persistência (etapa 3): implementação no clone atual
 
-O clone contém sete migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
+O clone contém oito migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A migration 8 alinha reversões por tipo e remove referências de `LOSS`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
 
 ### 13.1 Garantias definidas no schema
 
 - `wallets`: unicidade de player/moeda, saldo não negativo, moeda em formato de três letras maiúsculas, versão positiva e trigger que só permite incrementar a versão quando o saldo muda.
-- `wager_transactions`: chaves únicas por provedor, valores positivos, tipos e estados enumerados, exigência de referência para `REFUND`/`ROLLBACK`, reversão única quando processada, tentativas não negativas e trigger que bloqueia atualização após estado terminal.
+- `wager_transactions`: chaves únicas por provedor, valores positivos, tipos e estados enumerados, exigência de referência para `REFUND`/`ROLLBACK`, uma reversão processada de cada tipo por referência, ausência de referência em `LOSS`, tentativas não negativas e trigger que bloqueia atualização após estado terminal.
 - `wallet_ledger_entries`: sequência de identidade para paginação, unicidade por wallet/transação, aritmética e saldos não negativos, cadeia serializada pelo lock da wallet e trigger de imutabilidade para `UPDATE`, `DELETE` e `TRUNCATE`.
 - `inbox_messages`: chave primária composta por consumidor e mensagem.
 - `outbox_messages`: payload JSONB vinculado ao `eventId`, índice parcial para mensagens pendentes, tentativas não negativas e bloqueio de exclusão enquanto pendente.

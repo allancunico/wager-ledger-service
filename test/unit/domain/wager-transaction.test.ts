@@ -48,15 +48,14 @@ describe('WagerTransaction.create', () => {
     expect(tx.requiresReference()).toBe(true);
   });
 
-  test('WIN e LOSS aceitam referência opcional', () => {
+  test('WIN aceita referência opcional; LOSS não aceita referência', () => {
     expect(makeTx({ kind: Win }).referenceExternalTransactionId).toBeUndefined();
     expect(makeTx({ kind: Win, referenceExternalTransactionId: 'bet-1' }).requiresReference()).toBe(
       false,
     );
-    expect(
-      makeTx({ kind: Loss, referenceExternalTransactionId: 'bet-1' })
-        .referenceExternalTransactionId,
-    ).toBe('bet-1');
+    expect(() => makeTx({ kind: Loss, referenceExternalTransactionId: 'bet-1' })).toThrow(
+      InvalidInputError,
+    );
   });
 
   test('BET não aceita referência', () => {

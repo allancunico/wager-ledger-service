@@ -43,6 +43,7 @@ export enum FailureCode {
   /** A referência existe, mas está `REJECTED`/`FAILED` (ou ainda pendente ao fim do TTL). */
   ReferenceNotProcessed = 'REFERENCE_NOT_PROCESSED',
   ReferenceKindNotAllowed = 'REFERENCE_KIND_NOT_ALLOWED',
+  /** Já existe uma reversão processada da referência com este mesmo tipo. */
   ReferenceAlreadyReversed = 'REFERENCE_ALREADY_REVERSED',
   /** Referência de outro provider, player, wallet ou rodada. */
   ReferenceMismatch = 'REFERENCE_MISMATCH',
@@ -58,7 +59,6 @@ const ALLOWED_REFERENCE_KINDS: Readonly<
   Partial<Record<WagerTransactionKind, readonly WagerTransactionKind[]>>
 > = {
   [WagerTransactionKind.Win]: [WagerTransactionKind.Bet],
-  [WagerTransactionKind.Loss]: [WagerTransactionKind.Bet],
   [WagerTransactionKind.Refund]: [WagerTransactionKind.Bet],
   [WagerTransactionKind.Rollback]: [
     WagerTransactionKind.Bet,

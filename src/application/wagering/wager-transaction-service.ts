@@ -171,7 +171,7 @@ export class WagerTransactionService {
           if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
         }
         const referenceAlreadyReversed = reference
-          ? await this.referenceAlreadyReversed(em, reference.id)
+          ? await this.referenceAlreadyReversed(em, reference.id, transaction.kind)
           : false;
         const outcome = processTransaction({
           transaction,
@@ -350,7 +350,7 @@ export class WagerTransactionService {
           if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
         }
         const referenceAlreadyReversed = reference
-          ? await this.referenceAlreadyReversed(em, reference.id)
+          ? await this.referenceAlreadyReversed(em, reference.id, transaction.kind)
           : false;
         const outcome = processTransaction({
           transaction,
@@ -439,10 +439,14 @@ export class WagerTransactionService {
     return resultFor(transaction, true);
   }
 
-  private async referenceAlreadyReversed(em: EntityManager, referenceId: string): Promise<boolean> {
+  private async referenceAlreadyReversed(
+    em: EntityManager,
+    referenceId: string,
+    reversalKind: WagerTransactionKind,
+  ): Promise<boolean> {
     const rows = await em.execute<{ found: boolean }[]>(
-      `select exists(select 1 from wager_transactions where reference_transaction_id = ? and status = 'PROCESSED' and kind in ('REFUND', 'ROLLBACK')) as found`,
-      [referenceId],
+      `select exists(select 1 from wager_transactions where reference_transaction_id = ? and status = 'PROCESSED' and kind = ?) as found`,
+      [referenceId, reversalKind],
     );
     return rows[0]?.found ?? false;
   }

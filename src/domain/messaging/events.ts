@@ -60,7 +60,7 @@ function toProps(ctx: EventContext, aggregateId: string) {
 export interface WagerTransactionProcessedData extends TransactionEventData {
   /** Saldo da wallet observado quando a transação foi aplicada. */
   balance: MoneyProps;
-  /** Id interno da referência, nas reversões e nos WIN/LOSS com referência resolvida. */
+  /** Id interno da referência, nas reversões e nos WIN com referência resolvida. */
   referenceTransactionId?: string;
 }
 

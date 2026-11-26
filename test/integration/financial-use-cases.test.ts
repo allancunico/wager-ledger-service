@@ -125,6 +125,70 @@ describe('financial use cases', () => {
       }),
     ).toBe(1);
   });
+
+  test('allows one REFUND and one ROLLBACK per reference, but rejects duplicates of each kind', async () => {
+    const playerId = uuidv7();
+    const wallet = await wallets.create({
+      playerId,
+      initialBalance: Money.from({ amount: '50.00', currency: 'BRL' }),
+    });
+    const betExternalId = uuidv7();
+    const roundId = uuidv7();
+    const bet = await transactions.submit(
+      wagerInput({
+        playerId,
+        walletId: wallet.id,
+        externalTransactionId: betExternalId,
+        roundId,
+        kind: WagerTransactionKind.Bet,
+      }),
+    );
+    expect(bet.httpStatus).toBe(201);
+
+    const refund = await transactions.submit(
+      wagerInput({
+        playerId,
+        walletId: wallet.id,
+        roundId,
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: betExternalId,
+      }),
+    );
+    const rollback = await transactions.submit(
+      wagerInput({
+        playerId,
+        walletId: wallet.id,
+        roundId,
+        kind: WagerTransactionKind.Rollback,
+        referenceExternalTransactionId: betExternalId,
+      }),
+    );
+    const duplicateRefund = await transactions.submit(
+      wagerInput({
+        playerId,
+        walletId: wallet.id,
+        roundId,
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: betExternalId,
+      }),
+    );
+    const duplicateRollback = await transactions.submit(
+      wagerInput({
+        playerId,
+        walletId: wallet.id,
+        roundId,
+        kind: WagerTransactionKind.Rollback,
+        referenceExternalTransactionId: betExternalId,
+      }),
+    );
+
+    expect(refund.body.status).toBe('PROCESSED');
+    expect(rollback.body.status).toBe('PROCESSED');
+    expect(duplicateRefund.body.failureCode).toBe('REFERENCE_ALREADY_REVERSED');
+    expect(duplicateRollback.body.failureCode).toBe('REFERENCE_ALREADY_REVERSED');
+    expect((await wallets.get(wallet.id)).balance.amount).toBe('70.00');
+    expect((await wallets.reconcile(wallet.id)).consistent).toBe(true);
+  });
 });
 
 function wagerInput(overrides: {
@@ -133,6 +197,7 @@ function wagerInput(overrides: {
   kind?: WagerTransactionKind;
   externalTransactionId?: string;
   idempotencyKey?: string;
+  roundId?: string;
   referenceExternalTransactionId?: string;
 }) {
   const externalTransactionId = overrides.externalTransactionId ?? uuidv7();
@@ -142,7 +207,7 @@ function wagerInput(overrides: {
     idempotencyKey: overrides.idempotencyKey ?? `key:${externalTransactionId}`,
     playerId: overrides.playerId,
     walletId: overrides.walletId,
-    roundId: uuidv7(),
+    roundId: overrides.roundId ?? uuidv7(),
     gameId: 'integration-game',
     kind: overrides.kind ?? WagerTransactionKind.Bet,
     money: Money.from({ amount: '20.00', currency: 'BRL' }),

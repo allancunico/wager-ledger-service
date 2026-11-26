@@ -150,6 +150,11 @@ describe.skipIf(!enabled)('PostgreSQL schema constraints', () => {
         insertTransaction(tx, walletId, { kind: 'REFUND', referenceExternalId: null }),
       ),
     );
+    await expectDatabaseFailure(() =>
+      em.transactional((tx) =>
+        insertTransaction(tx, walletId, { kind: 'LOSS', referenceExternalId: 'bet-1' }),
+      ),
+    );
   });
 
   test('processed balance transactions require a matching ledger entry at commit', async () => {
@@ -162,30 +167,56 @@ describe.skipIf(!enabled)('PostgreSQL schema constraints', () => {
     );
   });
 
-  test('only one processed refund or rollback can reverse a transaction', async () => {
+  test('allows one processed reversal of each kind per reference, but not duplicates of a kind', async () => {
     const em = getOrm().em;
-    await expectDatabaseFailure(() =>
-      em.transactional(async (tx) => {
-        const walletId = await insertWallet(tx, { balance: '2.00' });
-        const referenceId = await insertTransaction(tx, walletId, {
-          kind: 'LOSS',
-          status: 'PROCESSED',
-        });
+    const rollbackMarker = new Error('rollback intentionally to avoid deferred ledger checks');
+    let allowedPairCount = 0;
+    try {
+      await em.transactional(async (tx) => {
+        const walletId = await insertWallet(tx);
+        const referenceId = await insertTransaction(tx, walletId, { kind: 'BET' });
         const provider = crypto.randomUUID();
         await insertTransaction(tx, walletId, {
           provider,
           kind: 'REFUND',
           status: 'PROCESSED',
           referenceId,
-          referenceExternalId: 'loss-ref',
+          referenceExternalId: 'bet-ref',
         });
         await insertTransaction(tx, walletId, {
           provider,
           kind: 'ROLLBACK',
           status: 'PROCESSED',
           referenceId,
-          referenceExternalId: 'loss-ref',
+          referenceExternalId: 'bet-ref',
         });
+        const [rows] = await tx.execute<{ count: string }[]>(
+          `select count(*)::text as count from wager_transactions
+            where reference_transaction_id = ? and kind in ('REFUND','ROLLBACK')`,
+          [referenceId],
+        );
+        allowedPairCount = Number(rows?.count ?? 0);
+        throw rollbackMarker;
+      });
+    } catch (error) {
+      if (error !== rollbackMarker) throw error;
+    }
+    expect(allowedPairCount).toBe(2);
+
+    await expectDatabaseFailure(() =>
+      em.transactional(async (tx) => {
+        const walletId = await insertWallet(tx);
+        const referenceId = await insertTransaction(tx, walletId, { kind: 'BET' });
+        const provider = crypto.randomUUID();
+        const reversal = {
+          provider,
+          kind: 'REFUND',
+          status: 'PROCESSED',
+          referenceId,
+          referenceExternalId: 'bet-ref',
+        };
+        await insertTransaction(tx, walletId, reversal);
+        await insertTransaction(tx, walletId, { ...reversal, external: crypto.randomUUID() });
       }),
     );
   });
