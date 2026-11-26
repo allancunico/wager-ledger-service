@@ -33,13 +33,13 @@ O PostgreSQL do Compose é publicado em `localhost:5433` para evitar conflito co
 | `bun run spike` | spike da etapa 1 (precisa de um PostgreSQL acessível, ver abaixo) |
 | `bun run infra:up` / `infra:down` | sobe / derruba a infra local |
 | `bun run test:unit` | testes unitários do domínio e round-trip dos mappers (não precisam de banco nem de Docker) |
-| `bun run test:integration` | testes de migrations e constraints em PostgreSQL (criam e removem um banco temporário) |
+| `bun run test:integration` | migrations, constraints, API e publisher com PostgreSQL e LocalStack (banco temporário) |
 | `bun run test:concurrency` | concorrência no PostgreSQL entre instâncias independentes do serviço |
 | `bun run migrate:up` | aplica as migrations |
 | `bun run migrate:down` | reverte a migration mais recente |
 | `bun run migrate:down -- --all` | reverte todas as migrations |
 
-Os testes de integração usam `TEST_DATABASE_ADMIN_URL` se definida; caso contrário, usam `DATABASE_URL` como conexão administrativa para criar um banco isolado. A role precisa poder criar e remover bancos. O teste de integração ainda requer PostgreSQL acessível.
+Os testes de integração usam `TEST_DATABASE_ADMIN_URL` se definida; caso contrário, usam `DATABASE_URL` como conexão administrativa para criar um banco isolado. A role precisa poder criar e remover bancos. `test:integration` requer PostgreSQL e LocalStack acessíveis; `test:concurrency` requer PostgreSQL.
 
 ## API HTTP (etapa 4)
 
@@ -71,7 +71,7 @@ Idempotency-Key: provedor-123
 
 Consultas disponíveis: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`. Erros usam `application/problem+json`. A autenticação está desligada pelo adaptador no-op.
 
-Os workers SQS e os testes de concorrência entre processos/instâncias HTTP pertencem às etapas seguintes.
+O publisher de eventos usa o papel `workers` e envia para a fila FIFO configurada. O consumidor da fila de entrada, o worker de `PENDING_REFERENCE` e os testes de concorrência entre processos HTTP pertencem às próximas etapas.
 
 ## Papéis do processo
 
@@ -79,7 +79,7 @@ Um mesmo código sobe até três papéis, escolhidos por `ROLES` (separados por 
 
 - `api`: API HTTP
 - `consumer`: consumidor da fila `wager-transactions.fifo`
-- `workers`: publisher da outbox e reprocessador de `PENDING_REFERENCE`
+- `workers`: publisher da outbox (reprocessador de `PENDING_REFERENCE` entra em etapa posterior)
 
 ```bash
 ROLES=api PORT=3101 bun run start

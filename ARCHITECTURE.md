@@ -189,7 +189,8 @@ Destino: fila SQS FIFO `wager-events.fifo`.
 - A outbox tem coluna `group_key` (a `walletId`), porque `aggregateId` nos eventos de transação é o `transactionId`.
 - Sem estado terminal: o publisher repete com backoff exponencial e teto, sem descartar. `attempts` e outbox lag são métricas, e um limiar de tentativas é alerta.
 - Janela de duplicação conhecida: o processo morre depois do envio e antes de marcar como publicado. O `eventId` estável torna isso seguro.
-- Publisher com `FOR UPDATE SKIP LOCKED` em lotes. O detalhe do claim (transação aberta durante o envio ou concessão com prazo) é decidido na etapa 6.
+- Publisher com `FOR UPDATE SKIP LOCKED` em lotes. O claim grava `claim_token` e `claimed_until` em uma transação curta; o envio SQS acontece fora dela. Uma lease expirada permite nova tentativa após crash.
+- A coluna identity `seq` determina a ordem de inserção, e o claim libera só o evento pendente mais antigo de cada `group_key`. Isso mantém a ordem FIFO por wallet mesmo com vários publishers.
 - Sem consumidor downstream e sem DLQ para esta fila. Nos testes, um helper lê a `wager-events.fifo`. SNS fica como evolução documentada.
 - Eventos: `WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged` (só quando o saldo muda), `WagerTransactionPendingReference`.
 
@@ -264,7 +265,7 @@ Migrations versionadas e reversíveis (Migrator do MikroORM), com SQL escrito à
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
 
-Estado do clone: as etapas 1 a 5 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL. Concorrência entre processos HTTP fica para a etapa 9; as etapas 6 a 10 permanecem no plano.
+Estado do clone: as etapas 1 a 6 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, e a etapa 6 publica outbox no SQS FIFO. Concorrência entre processos HTTP fica para a etapa 9; as etapas 7 a 10 permanecem no plano.
 
 ## 10. Limitações conhecidas
 
@@ -370,7 +371,7 @@ Além de passarem, os testes foram confrontados com 9 mutações deliberadas no 
 
 ## 13. Persistência (etapa 3): implementação no clone atual
 
-O clone contém seis migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
+O clone contém sete migrations SQL reversíveis, inicializadas pelo Migrator do MikroORM em `src/infrastructure/database/migrate.ts`. A configuração está centralizada em `orm.ts`; os registros usam `EntitySchema` sem decorators ou relações ORM, e `mappers.ts` converte os registros para as factories `rehydrate` do domínio.
 
 ### 13.1 Garantias definidas no schema
 
@@ -387,7 +388,7 @@ Valores monetários são `NUMERIC(19,2)` hidratados pelo driver como strings. Os
 
 Os testes unitários dos mappers cobrem os cinco registros, precisão decimal, `null`/`undefined`, snapshot/failure code e timestamps. Os testes de integração criam um banco PostgreSQL temporário, aplicam e revertem migrations e exercitam constraints de wallet, transação, ledger, inbox e outbox.
 
-Validação em 25/11/2026: `bun run test:integration` executou migrations, constraints e casos de uso contra PostgreSQL no Docker; a API HTTP também recebeu requisições reais em teste. A suíte cria bancos temporários `wager_test_*` e os remove ao final.
+Validação em 25/11/2026: `bun run test:integration` executa migrations, constraints, casos de uso, API HTTP e publicação da outbox contra PostgreSQL e LocalStack; `bun run test:concurrency` cobre duas instâncias independentes do serviço no PostgreSQL. As suítes criam bancos temporários `wager_test_*` e os removem ao final.
 
 ## 14. Aplicação e API HTTP (etapa 4)
 
@@ -403,3 +404,11 @@ Validação em 25/11/2026: `bun run test:integration` executou migrations, const
 `bun run test:concurrency` cria um banco temporário e usa dois ORMs independentes para representar instâncias concorrentes do serviço. O teste confirma que duas apostas de 80.00 contra saldo 100.00 produzem um processamento e uma rejeição, sem saldo negativo, e que oito entregas paralelas da mesma operação produzem um único débito, uma transação e seus eventos de outbox. A suíte também reconcilia saldo e cadeia do ledger após as disputas.
 
 Durante a validação foi corrigida uma corrida no caminho rápido de deduplicação: se a transação externa aparecia entre as consultas da chave idempotente e do id externo, a mesma chave era classificada incorretamente como conflito. Agora ela passa pela comparação de hash e retorna replay.
+
+## 16. Publisher da outbox (etapa 6)
+
+O papel `workers` publica envelopes em `wager-events.fifo`, resolvendo a URL da fila pelo nome configurado. Cada mensagem usa `eventId` como `MessageDeduplicationId` e `walletId` como `MessageGroupId`.
+
+O claim é uma lease persistida e curta. O publisher seleciona eventos com `SKIP LOCKED`, respeita o evento mais antigo pendente por wallet, confirma o claim e então chama SQS fora da transação. Sucesso marca `published_at`; falha incrementa `attempts`, agenda backoff e libera o claim. Se o processo morrer entre send e confirmação, a lease expira e o evento é enviado novamente com o mesmo id.
+
+Os testes de integração criam uma fila FIFO isolada no LocalStack, verificam ordem e publicação única, e simulam falha de send seguida de retry. O consumidor downstream ainda não faz parte desta etapa.

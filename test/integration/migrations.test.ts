@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import { v7 as uuidv7 } from 'uuid';
 import { createTestDatabase } from './helpers/database';
 
 const enabled = Boolean(process.env.TEST_DATABASE_ADMIN_URL || process.env.DATABASE_URL);
@@ -24,19 +25,38 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
     const migrator = getOrm().migrator;
     const executed = await migrator.getStorage().executed();
     expect(await migrator.getPending()).toHaveLength(0);
-    expect(executed).toHaveLength(6);
-    expect(new Set(executed).size).toBe(6);
+    expect(executed).toHaveLength(7);
+    expect(new Set(executed).size).toBe(7);
     expect(executed).toEqual([...executed].sort());
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(6);
+    expect(await migrator.getStorage().executed()).toHaveLength(7);
   });
 
   test('down reverts one migration and down to zero removes project schema objects', async () => {
     const migrator = getOrm().migrator;
+    const eventIds = [uuidv7(), uuidv7()];
+    for (const eventId of eventIds) {
+      await getOrm()
+        .em.fork()
+        .execute(
+          `insert into outbox_messages
+           (id, aggregate_id, group_key, event_type, payload, occurred_at, attempts)
+         values (?, ?, ?, 'MigrationProbe', ?::jsonb, now(), 0)`,
+          [eventId, uuidv7(), uuidv7(), JSON.stringify({ eventId })],
+        );
+    }
     await migrator.down();
-    expect(await migrator.getStorage().executed()).toHaveLength(5);
-    await migrator.up();
     expect(await migrator.getStorage().executed()).toHaveLength(6);
+    await migrator.up();
+    expect(await migrator.getStorage().executed()).toHaveLength(7);
+    const backfill = await getOrm()
+      .em.getConnection()
+      .execute<{ total: string; populated: string; uniqueSeqs: string; claimed: string }[]>(
+        `select count(*)::text as total, count(seq)::text as populated,
+                count(distinct seq)::text as "uniqueSeqs", count(claim_token)::text as claimed
+           from outbox_messages`,
+      );
+    expect(backfill).toEqual([{ total: '2', populated: '2', uniqueSeqs: '2', claimed: '0' }]);
 
     await migrator.down({ to: 0 });
     const tables = await getOrm()
@@ -55,6 +75,6 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
     expect(await migrator.getStorage().executed()).toHaveLength(0);
 
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(6);
+    expect(await migrator.getStorage().executed()).toHaveLength(7);
   });
 });

@@ -65,6 +65,8 @@ export class OutboxMessageRecord {
   attempts!: number;
   nextAttemptAt!: Date | null;
   publishedAt!: Date | null;
+  claimToken!: string | null;
+  claimedUntil!: Date | null;
 }
 
 export const WalletSchema = new EntitySchema<WalletRecord>({
@@ -171,5 +173,7 @@ export const OutboxMessageSchema = new EntitySchema<OutboxMessageRecord>({
     attempts: { type: 'integer' },
     nextAttemptAt: { name: 'next_attempt_at', type: 'timestamptz', nullable: true },
     publishedAt: { name: 'published_at', type: 'timestamptz', nullable: true },
+    claimToken: { name: 'claim_token', type: 'uuid', nullable: true },
+    claimedUntil: { name: 'claimed_until', type: 'timestamptz', nullable: true },
   },
 });

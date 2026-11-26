@@ -4,6 +4,7 @@ import { Migration20261124000003CreateWalletLedgerEntries } from './Migration202
 import { Migration20261124000004CreateMessaging } from './Migration20261124000004CreateMessaging';
 import { Migration20261124000005EnforceLedgerInvariants } from './Migration20261124000005EnforceLedgerInvariants';
 import { Migration20261125000006AllowReferencedWinLoss } from './Migration20261125000006AllowReferencedWinLoss';
+import { Migration20261125000007ClaimOutboxMessages } from './Migration20261125000007ClaimOutboxMessages';
 
 export const migrationsList = [
   Migration20261124000001CreateWallets,
@@ -12,4 +13,5 @@ export const migrationsList = [
   Migration20261124000004CreateMessaging,
   Migration20261124000005EnforceLedgerInvariants,
   Migration20261125000006AllowReferencedWinLoss,
+  Migration20261125000007ClaimOutboxMessages,
 ];

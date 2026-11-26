@@ -10,11 +10,14 @@ describe('HTTP API', () => {
   let app: Awaited<ReturnType<typeof NestFactory.create>>;
   let baseUrl: string;
   let oldDatabaseUrl: string | undefined;
+  let oldRoles: string | undefined;
 
   beforeAll(async () => {
     database = await createTestDatabase();
     oldDatabaseUrl = process.env.DATABASE_URL;
+    oldRoles = process.env.ROLES;
     process.env.DATABASE_URL = database.databaseUrl;
+    process.env.ROLES = 'api';
     app = await NestFactory.create(AppModule, { logger: false });
     app.useGlobalFilters(app.get(ApiExceptionFilter));
     await app.listen(0, '127.0.0.1');
@@ -27,6 +30,8 @@ describe('HTTP API', () => {
     await app?.close();
     if (oldDatabaseUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = oldDatabaseUrl;
+    if (oldRoles === undefined) delete process.env.ROLES;
+    else process.env.ROLES = oldRoles;
     await database?.close();
   });
 

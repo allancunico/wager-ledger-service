@@ -8,12 +8,14 @@ import {
   type NestModule,
 } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { OutboxPublisher, OutboxPublisherWorker } from './application/messaging/outbox-publisher';
 import { SYSTEM_CLOCK } from './application/shared/clock';
 import { WagerTransactionService } from './application/wagering/wager-transaction-service';
 import { WalletService } from './application/wallets/wallet-service';
 import type { Env } from './infrastructure/config/env';
 import { loadEnv } from './infrastructure/config/env';
 import { createOrm } from './infrastructure/database/orm';
+import { createSqsEventQueue } from './infrastructure/messaging/sqs-event-queue';
 import { ApiExceptionFilter } from './interfaces/http/api-exception.filter';
 import {
   AuthGuard,
@@ -29,6 +31,7 @@ import { WALLET_SERVICE, WalletController } from './interfaces/http/wallet.contr
 
 export const ENV = Symbol('ENV');
 export const DATABASE_ORM = Symbol('DATABASE_ORM');
+export const EVENT_QUEUE = Symbol('EVENT_QUEUE');
 
 @Controller('health')
 class HealthController {
@@ -61,6 +64,25 @@ class OrmLifecycle {
   providers: [
     { provide: ENV, useFactory: () => loadEnv() },
     { provide: DATABASE_ORM, useFactory: async () => createOrm() },
+    { provide: EVENT_QUEUE, useFactory: (env: Env) => createSqsEventQueue(env), inject: [ENV] },
+    {
+      provide: OutboxPublisher,
+      useFactory: (orm: MikroORM, queue: ReturnType<typeof createSqsEventQueue>, env: Env) =>
+        new OutboxPublisher(
+          orm,
+          queue,
+          SYSTEM_CLOCK,
+          env.OUTBOX_BATCH_SIZE,
+          env.OUTBOX_CLAIM_LEASE_SECONDS,
+        ),
+      inject: [DATABASE_ORM, EVENT_QUEUE, ENV],
+    },
+    {
+      provide: OutboxPublisherWorker,
+      useFactory: (publisher: OutboxPublisher, env: Env) =>
+        new OutboxPublisherWorker(publisher, env),
+      inject: [OutboxPublisher, ENV],
+    },
     {
       provide: WALLET_SERVICE,
       useFactory: (orm: MikroORM) => new WalletService(orm, SYSTEM_CLOCK),
