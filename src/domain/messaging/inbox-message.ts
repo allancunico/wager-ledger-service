@@ -22,7 +22,7 @@ export class InboxMessage {
     public readonly messageId: string,
     public readonly consumerName: string,
     public readonly payloadHash: string,
-    public readonly receivedAt: Date,
+    private readonly _receivedAt: Date,
     private _processedAt?: Date,
   ) {}
 
@@ -56,6 +56,10 @@ export class InboxMessage {
 
   get processedAt(): Date | undefined {
     return this._processedAt ? new Date(this._processedAt.getTime()) : undefined;
+  }
+
+  get receivedAt(): Date {
+    return new Date(this._receivedAt.getTime());
   }
 
   isProcessed(): boolean {

@@ -48,6 +48,8 @@ class HealthController {
     @Inject(ENV) private readonly env: Env,
     @Inject(DATABASE_ORM) private readonly orm: MikroORM,
     @Inject(SqsTransactionConsumer) private readonly transactionsQueue: SqsTransactionConsumer,
+    @Inject(EVENT_QUEUE)
+    private readonly eventsQueue: ReturnType<typeof createSqsEventQueue>,
   ) {}
 
   @Get('live')
@@ -60,6 +62,7 @@ class HealthController {
     try {
       await this.orm.em.fork().execute('select 1');
       await this.transactionsQueue.checkReady();
+      await this.eventsQueue.checkReady();
       return { status: 'ready' };
     } catch {
       throw new ServiceUnavailableException('Dependências indisponíveis');

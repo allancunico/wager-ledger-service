@@ -1,4 +1,9 @@
-import { GetQueueUrlCommand, SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import {
+  GetQueueAttributesCommand,
+  GetQueueUrlCommand,
+  SendMessageCommand,
+  SQSClient,
+} from '@aws-sdk/client-sqs';
 import type { Env } from '../config/env';
 
 export interface EventQueuePort {
@@ -12,6 +17,18 @@ export class SqsEventQueue implements EventQueuePort {
     private readonly client: SQSClient,
     private readonly queueName: string,
   ) {}
+
+  async checkReady(): Promise<void> {
+    const result = await this.client.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: await this.getQueueUrl(),
+        AttributeNames: ['QueueArn'],
+      }),
+    );
+    if (!result.Attributes?.QueueArn) {
+      throw new Error(`SQS não retornou ARN para a fila ${this.queueName}`);
+    }
+  }
 
   async publish(input: { eventId: string; groupKey: string; body: string }): Promise<void> {
     const queueUrl = await this.getQueueUrl();

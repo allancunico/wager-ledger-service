@@ -65,7 +65,7 @@ export class Wallet {
     public readonly currency: string,
     private _balance: Money,
     private _version: number,
-    public readonly createdAt: Date,
+    private readonly _createdAt: Date,
     private _updatedAt: Date,
   ) {}
 
@@ -132,6 +132,10 @@ export class Wallet {
 
   get version(): number {
     return this._version;
+  }
+
+  get createdAt(): Date {
+    return new Date(this._createdAt.getTime());
   }
 
   get updatedAt(): Date {

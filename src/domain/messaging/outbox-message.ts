@@ -40,7 +40,7 @@ export class OutboxMessage {
     public readonly groupKey: string,
     public readonly eventType: string,
     public readonly payload: Readonly<Record<string, unknown>>,
-    public readonly occurredAt: Date,
+    private readonly _occurredAt: Date,
     private _attempts: number,
     private _nextAttemptAt?: Date,
     private _publishedAt?: Date,
@@ -78,6 +78,10 @@ export class OutboxMessage {
 
   get attempts(): number {
     return this._attempts;
+  }
+
+  get occurredAt(): Date {
+    return new Date(this._occurredAt.getTime());
   }
 
   get nextAttemptAt(): Date | undefined {

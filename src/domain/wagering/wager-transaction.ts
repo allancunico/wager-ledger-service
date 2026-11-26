@@ -176,7 +176,7 @@ export class WagerTransaction {
     public readonly money: Money,
     /** id no provedor, não o id interno */
     public readonly referenceExternalTransactionId: string | undefined,
-    public readonly createdAt: Date,
+    private readonly _createdAt: Date,
     private _status: WagerTransactionStatus,
     private _referenceTransactionId: string | undefined,
     private _failureCode: FailureCode | undefined,
@@ -311,6 +311,10 @@ export class WagerTransaction {
 
   get status(): WagerTransactionStatus {
     return this._status;
+  }
+
+  get createdAt(): Date {
+    return new Date(this._createdAt.getTime());
   }
 
   get referenceTransactionId(): string | undefined {

@@ -49,28 +49,32 @@ export class SqsTransactionConsumer {
   }
 
   async checkReady(): Promise<void> {
-    await this.client.send(
+    const queueUrl = await this.getQueueUrl();
+    const queueResult = await this.client.send(
       new GetQueueAttributesCommand({
-        QueueUrl: await this.getQueueUrl(),
+        QueueUrl: queueUrl,
+        AttributeNames: ['QueueArn', 'RedrivePolicy'],
+      }),
+    );
+    const queueArn = queueResult.Attributes?.QueueArn;
+    const redrivePolicy = parseRedrivePolicy(queueResult.Attributes?.RedrivePolicy);
+    const deadLetterUrl = await this.getDeadLetterQueueUrl();
+    const deadLetterResult = await this.client.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: deadLetterUrl,
         AttributeNames: ['QueueArn'],
       }),
     );
+    const deadLetterArn = deadLetterResult.Attributes?.QueueArn;
+    if (!queueArn || !deadLetterArn || redrivePolicy.deadLetterTargetArn !== deadLetterArn) {
+      throw new Error('SQS: DLQ não corresponde à redrive policy da fila de transações');
+    }
   }
 
   async getDeadLetterVisibleCount(): Promise<number> {
-    this.deadLetterUrlPromise ??= this.client
-      .send(new GetQueueUrlCommand({ QueueName: this.env.SQS_TRANSACTIONS_DLQ }))
-      .then((result) => {
-        if (!result.QueueUrl) throw new Error('SQS não retornou URL da DLQ de transações');
-        return result.QueueUrl;
-      })
-      .catch((error: unknown) => {
-        this.deadLetterUrlPromise = undefined;
-        throw error;
-      });
     const result = await this.client.send(
       new GetQueueAttributesCommand({
-        QueueUrl: await this.deadLetterUrlPromise,
+        QueueUrl: await this.getDeadLetterQueueUrl(),
         AttributeNames: ['ApproximateNumberOfMessages'],
       }),
     );
@@ -129,6 +133,14 @@ export class SqsTransactionConsumer {
           component: 'sqs-transaction-consumer',
           phase,
           messageId: message.messageId,
+          ...(input
+            ? {
+                correlationId: input.correlationId,
+                walletId: input.walletId,
+                providerId: input.providerId,
+                externalTransactionId: input.externalTransactionId,
+              }
+            : {}),
           error: error instanceof Error ? error.name : 'UnknownError',
           code: error instanceof PermanentQueueMessageError ? error.code : undefined,
         },
@@ -149,6 +161,10 @@ export class SqsTransactionConsumer {
             {
               component: 'sqs-transaction-consumer',
               messageId: message.messageId,
+              correlationId: input.correlationId,
+              walletId: input.walletId,
+              providerId: input.providerId,
+              externalTransactionId: input.externalTransactionId,
               action: 'record-failed-best-effort',
               error: failureError instanceof Error ? failureError.name : 'UnknownError',
             },
@@ -157,7 +173,7 @@ export class SqsTransactionConsumer {
         }
       }
       if (!isPermanentInputError(error)) {
-        await this.scheduleRetry(message.receiptHandle, message.messageId, receiveCount);
+        await this.scheduleRetry(message.receiptHandle, message.messageId, receiveCount, input);
       }
       return false;
     }
@@ -216,7 +232,26 @@ export class SqsTransactionConsumer {
     return this.queueUrlPromise;
   }
 
-  private async scheduleRetry(receiptHandle: string, messageId: string, receiveCount: number) {
+  private async getDeadLetterQueueUrl(): Promise<string> {
+    this.deadLetterUrlPromise ??= this.client
+      .send(new GetQueueUrlCommand({ QueueName: this.env.SQS_TRANSACTIONS_DLQ }))
+      .then((result) => {
+        if (!result.QueueUrl) throw new Error('SQS não retornou URL da DLQ de transações');
+        return result.QueueUrl;
+      })
+      .catch((error: unknown) => {
+        this.deadLetterUrlPromise = undefined;
+        throw error;
+      });
+    return this.deadLetterUrlPromise;
+  }
+
+  private async scheduleRetry(
+    receiptHandle: string,
+    messageId: string,
+    receiveCount: number,
+    input?: SubmitWagerInput,
+  ) {
     const delayMs = computeBackoffMs(Math.max(0, receiveCount - 1), {
       baseSeconds: this.env.SQS_RETRY_BACKOFF_BASE_SECONDS,
       maxSeconds: this.env.SQS_RETRY_BACKOFF_MAX_SECONDS,
@@ -237,6 +272,14 @@ export class SqsTransactionConsumer {
           component: 'sqs-transaction-consumer',
           action: 'schedule-retry-failed',
           messageId,
+          ...(input
+            ? {
+                correlationId: input.correlationId,
+                walletId: input.walletId,
+                providerId: input.providerId,
+                externalTransactionId: input.externalTransactionId,
+              }
+            : {}),
           error: error instanceof Error ? error.name : 'UnknownError',
         },
         'could not set SQS retry visibility timeout; queue default will apply',
@@ -260,6 +303,28 @@ export class SqsTransactionConsumer {
         ),
     );
   }
+}
+
+function parseRedrivePolicy(value: string | undefined): { deadLetterTargetArn: string } {
+  if (!value) throw new Error('SQS: fila de transações sem redrive policy configurada');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('SQS: redrive policy da fila de transações é inválida');
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !('deadLetterTargetArn' in parsed) ||
+    typeof parsed.deadLetterTargetArn !== 'string' ||
+    !('maxReceiveCount' in parsed) ||
+    !/^\d+$/.test(String(parsed.maxReceiveCount)) ||
+    Number(parsed.maxReceiveCount) < 1
+  ) {
+    throw new Error('SQS: redrive policy da fila de transações é inválida');
+  }
+  return { deadLetterTargetArn: parsed.deadLetterTargetArn };
 }
 
 export class PermanentQueueMessageError extends Error {

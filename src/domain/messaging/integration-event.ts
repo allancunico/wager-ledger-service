@@ -45,7 +45,7 @@ export abstract class IntegrationEvent<T> {
   readonly aggregateId: string;
   readonly correlationId: string;
   readonly causationId?: string;
-  readonly occurredAt: Date;
+  private readonly _occurredAt: Date;
   readonly data: Readonly<T>;
 
   protected constructor(props: IntegrationEventProps<T>) {
@@ -53,8 +53,12 @@ export abstract class IntegrationEvent<T> {
     this.aggregateId = props.aggregateId;
     this.correlationId = props.correlationId;
     this.causationId = props.causationId;
-    this.occurredAt = new Date(props.occurredAt.getTime());
+    this._occurredAt = new Date(props.occurredAt.getTime());
     this.data = deepFreeze(props.data);
+  }
+
+  get occurredAt(): Date {
+    return new Date(this._occurredAt.getTime());
   }
 
   /**

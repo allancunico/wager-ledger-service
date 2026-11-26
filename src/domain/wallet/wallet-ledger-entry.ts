@@ -41,7 +41,7 @@ export class WalletLedgerEntry {
     public readonly money: Money,
     public readonly balanceBefore: Money,
     public readonly balanceAfter: Money,
-    public readonly createdAt: Date,
+    private readonly _createdAt: Date,
   ) {
     Object.freeze(this);
   }
@@ -89,6 +89,10 @@ export class WalletLedgerEntry {
         ? this.balanceBefore.add(this.money)
         : this.balanceBefore.subtract(this.money);
     return expected.equals(this.balanceAfter);
+  }
+
+  get createdAt(): Date {
+    return new Date(this._createdAt.getTime());
   }
 
   private static build(props: CreateLedgerEntryProps): WalletLedgerEntry {

@@ -139,71 +139,94 @@ export class WagerTransactionService {
   async reprocessPendingReferences(batchSize: number): Promise<number> {
     let processed = 0;
     while (processed < batchSize) {
-      const didProcess = await this.orm.em.fork().transactional(async (em) => {
-        const now = this.clock.now();
-        const expiredBefore = new Date(now.getTime() - this.pendingPolicyTtlMilliseconds());
-        await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
-        const [candidate] = await em.execute<{ id: string }[]>(
-          `select id
-             from wager_transactions
-            where status = 'PENDING_REFERENCE'
-              and (next_reference_attempt_at <= ? or created_at <= ?)
-            order by next_reference_attempt_at nulls first, created_at, id
-            limit 1
-            for update skip locked`,
-          [now, expiredBefore],
-        );
-        if (!candidate) return false;
-        this.metrics?.recordRetry('pending_reference');
-
-        const record = await em.findOneOrFail(WagerTransactionRecord, { id: candidate.id });
-        const transaction = wagerTransactionFromRecord(record);
-        const walletRecord = await WalletService.lockWallet(em, transaction.walletId);
-        if (!walletRecord) throw new WalletMissingError();
-        const wallet = walletFromRecord(walletRecord);
-
-        let reference: WagerTransaction | undefined;
-        if (transaction.referenceExternalTransactionId !== undefined) {
-          const referenceRecord = await em.findOne(WagerTransactionRecord, {
-            providerId: transaction.providerId,
-            externalTransactionId: transaction.referenceExternalTransactionId,
-          });
-          if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
-        }
-        const referenceAlreadyReversed = reference
-          ? await this.referenceAlreadyReversed(em, reference.id, transaction.kind)
-          : false;
-        const outcome = processTransaction({
-          transaction,
-          wallet,
-          reference,
-          referenceAlreadyReversed,
-          now,
-          newEntryId: newId,
-          pendingReferencePolicy: this.pendingPolicy,
-        });
-
-        if (outcome.type === 'PROCESSED' && outcome.entry) {
-          await em.nativeUpdate(
-            WalletRecord,
-            { id: wallet.id },
-            {
-              balance: wallet.balance.amount,
-              version: wallet.version,
-              updatedAt: wallet.updatedAt,
-            },
+      let errorContext: Record<string, string> = {};
+      let didProcess: boolean;
+      try {
+        didProcess = await this.orm.em.fork().transactional(async (em) => {
+          const now = this.clock.now();
+          const expiredBefore = new Date(now.getTime() - this.pendingPolicyTtlMilliseconds());
+          await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
+          const [candidate] = await em.execute<{ id: string }[]>(
+            `select id
+               from wager_transactions
+              where status = 'PENDING_REFERENCE'
+                and (next_reference_attempt_at <= ? or created_at <= ?)
+              order by next_reference_attempt_at nulls first, created_at, id
+              limit 1
+              for update skip locked`,
+            [now, expiredBefore],
           );
-          await em.insert(LedgerEntryRecord, ledgerEntryToRecord(outcome.entry));
-        }
-        await em.nativeUpdate(
-          WagerTransactionRecord,
-          { id: transaction.id },
-          wagerTransactionToRecord(transaction),
+          if (!candidate) return false;
+          errorContext = { transactionId: candidate.id, correlationId: candidate.id };
+          this.metrics?.recordRetry('pending_reference');
+
+          const record = await em.findOneOrFail(WagerTransactionRecord, { id: candidate.id });
+          const transaction = wagerTransactionFromRecord(record);
+          errorContext = {
+            transactionId: transaction.id,
+            correlationId: transaction.id,
+            walletId: transaction.walletId,
+            providerId: transaction.providerId,
+            externalTransactionId: transaction.externalTransactionId,
+          };
+          const walletRecord = await WalletService.lockWallet(em, transaction.walletId);
+          if (!walletRecord) throw new WalletMissingError();
+          const wallet = walletFromRecord(walletRecord);
+
+          let reference: WagerTransaction | undefined;
+          if (transaction.referenceExternalTransactionId !== undefined) {
+            const referenceRecord = await em.findOne(WagerTransactionRecord, {
+              providerId: transaction.providerId,
+              externalTransactionId: transaction.referenceExternalTransactionId,
+            });
+            if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
+          }
+          const referenceAlreadyReversed = reference
+            ? await this.referenceAlreadyReversed(em, reference.id, transaction.kind)
+            : false;
+          const outcome = processTransaction({
+            transaction,
+            wallet,
+            reference,
+            referenceAlreadyReversed,
+            now,
+            newEntryId: newId,
+            pendingReferencePolicy: this.pendingPolicy,
+          });
+
+          if (outcome.type === 'PROCESSED' && outcome.entry) {
+            await em.nativeUpdate(
+              WalletRecord,
+              { id: wallet.id },
+              {
+                balance: wallet.balance.amount,
+                version: wallet.version,
+                updatedAt: wallet.updatedAt,
+              },
+            );
+            await em.insert(LedgerEntryRecord, ledgerEntryToRecord(outcome.entry));
+          }
+          await em.nativeUpdate(
+            WagerTransactionRecord,
+            { id: transaction.id },
+            wagerTransactionToRecord(transaction),
+          );
+          // A ID da transação dá uma correlação estável, pois o correlationId original não é persistido.
+          await this.enqueueOutcomeEvents(em, transaction, wallet, outcome, transaction.id, now);
+          return true;
+        });
+      } catch (error) {
+        logger.error(
+          {
+            component: 'pending-reference-worker',
+            ...errorContext,
+            error: error instanceof Error ? error.name : 'UnknownError',
+            code: findSqlState(error) || undefined,
+          },
+          'pending reference processing failed',
         );
-        // A ID da transação dá uma correlação estável, pois o correlationId original não é persistido.
-        await this.enqueueOutcomeEvents(em, transaction, wallet, outcome, transaction.id, now);
-        return true;
-      });
+        throw error;
+      }
       if (!didProcess) break;
       processed += 1;
     }

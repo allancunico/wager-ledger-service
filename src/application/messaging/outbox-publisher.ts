@@ -108,6 +108,10 @@ export class OutboxPublisher {
         {
           component: 'outbox-publisher',
           eventId: row.id,
+          eventType: row.eventType,
+          aggregateId: row.aggregateId,
+          walletId: row.groupKey,
+          ...eventLogContext(row.payload),
           attempt: message.attempts,
           error: error instanceof Error ? error.name : 'UnknownError',
         },
@@ -124,6 +128,20 @@ export class OutboxPublisher {
       [publishedAt, row.id, claimToken],
     );
   }
+}
+
+function eventLogContext(payload: Record<string, unknown>): Record<string, string> {
+  const data = isRecord(payload.data) ? payload.data : {};
+  return {
+    ...(typeof payload.correlationId === 'string' ? { correlationId: payload.correlationId } : {}),
+    ...(typeof data.transactionId === 'string' ? { transactionId: data.transactionId } : {}),
+    ...(typeof data.walletId === 'string' ? { walletId: data.walletId } : {}),
+    ...(typeof data.providerId === 'string' ? { providerId: data.providerId } : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export class OutboxPublisherWorker {
