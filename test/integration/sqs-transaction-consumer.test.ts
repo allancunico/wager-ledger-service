@@ -46,7 +46,7 @@ describe('SQS transaction consumer', () => {
     secondOrm = await createOrm(database.databaseUrl);
     env = loadEnv();
     sqs = createSqsTransactionConsumerClient(env);
-    const queues = await createFifoQueuePair(sqs, 'consumer-it', 5, 1);
+    const queues = await createFifoQueuePair(sqs, 'consumer-it', 5, 30);
     queueName = queues.queueName;
     queueUrl = queues.queueUrl;
     dlqName = queues.dlqName;
@@ -145,6 +145,41 @@ describe('SQS transaction consumer', () => {
       }),
     ).toBe(1);
   }, 10_000);
+
+  test('crash after commit is recovered by inbox deduplication on redelivery', async () => {
+    const crashQueue = await createFifoQueuePair(sqs, 'crash-it', 5, 1);
+    let recoveryWorker: Bun.Subprocess | undefined;
+    try {
+      const { wallet, input } = await createWalletAndInput('50.00', '12.50');
+      const body = JSON.stringify({ ...input, money: input.money.toJSON() });
+      await sendMessage(crashQueue.queueUrl, wallet.id, body);
+
+      const crashingWorker = spawnConsumer(database.databaseUrl, crashQueue.queueName, true);
+      expect(await waitForExit(crashingWorker, 20_000)).toBe(137);
+      expect(await readBalance(wallet.id)).toBe('37.50');
+      expect(
+        await database.orm.em.fork().count(WagerTransactionRecord, {
+          providerId: input.providerId,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      ).toBe(1);
+
+      recoveryWorker = spawnConsumer(database.databaseUrl, crashQueue.queueName, false);
+      await waitForQueueEmpty(crashQueue.queueUrl, 15_000);
+      expect(await readBalance(wallet.id)).toBe('37.50');
+      expect(
+        await database.orm.em.fork().count(InboxMessageRecord, {
+          consumerName: env.SQS_CONSUMER_NAME,
+          processedAt: { $ne: null },
+        }),
+      ).toBe(1);
+    } finally {
+      if (recoveryWorker?.exitCode === null) recoveryWorker.kill('SIGTERM');
+      if (recoveryWorker) await recoveryWorker.exited;
+      await deleteQueueIfPresent(sqs, crashQueue.queueName);
+      await deleteQueueIfPresent(sqs, crashQueue.dlqName);
+    }
+  }, 40_000);
 
   test('ACKs a business rejection as a terminal result without changing balance', async () => {
     const { wallet, input } = await createWalletAndInput('5.00', '8.00');
@@ -347,4 +382,66 @@ async function deleteQueueIfPresent(client: SQSClient, queueName: string): Promi
 function sqsRef(): SQSClient {
   if (!sqs) throw new Error('SQS client not initialized');
   return sqs;
+}
+
+function spawnConsumer(
+  databaseUrl: string,
+  transactionsQueue: string,
+  crashAfterCommit: boolean,
+): Bun.Subprocess {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  const childEnv: Record<string, string> = {
+    ...inherited,
+    DATABASE_URL: databaseUrl,
+    ROLES: 'consumer',
+    SQS_TRANSACTIONS_QUEUE: transactionsQueue,
+    SQS_CONSUMER_WAIT_SECONDS: '1',
+  };
+  if (crashAfterCommit) childEnv.FAULT = 'crash_after_commit';
+  else delete childEnv.FAULT;
+  return Bun.spawn([process.execPath, 'run', 'src/main.ts'], {
+    cwd: process.cwd(),
+    env: childEnv,
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+}
+
+async function waitForExit(child: Bun.Subprocess, timeoutMs: number): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && child.exitCode === null) await Bun.sleep(50);
+  if (child.exitCode === null) {
+    child.kill('SIGTERM');
+    await child.exited;
+    throw new Error('Consumer não encerrou após o fault injection');
+  }
+  return child.exitCode;
+}
+
+async function waitForQueueEmpty(queueUrl: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  let stableEmptyChecks = 0;
+  while (Date.now() < deadline) {
+    const result = await sqsRef().send(
+      new GetQueueAttributesCommand({
+        QueueUrl: queueUrl,
+        AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+      }),
+    );
+    const visible = Number(result.Attributes?.ApproximateNumberOfMessages ?? 0);
+    const inFlight = Number(result.Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0);
+    if (visible === 0 && inFlight === 0 && Date.now() - startedAt >= 2500) {
+      stableEmptyChecks += 1;
+      if (stableEmptyChecks >= 3) return;
+    } else {
+      stableEmptyChecks = 0;
+    }
+    await Bun.sleep(200);
+  }
+  throw new Error('A mensagem não foi removida da fila após a recuperação');
 }

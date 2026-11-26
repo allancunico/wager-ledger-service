@@ -18,6 +18,7 @@ import {
   WagerTransactionRecord,
   WalletRecord,
 } from '../../infrastructure/persistence/records';
+import type { ApplicationMetrics } from '../observability/application-metrics';
 import type { Clock } from '../shared/clock';
 import { newId } from '../shared/ids';
 
@@ -34,6 +35,7 @@ export class WalletService {
   constructor(
     private readonly orm: MikroORM,
     private readonly clock: Clock,
+    private readonly metrics?: ApplicationMetrics,
   ) {}
 
   async create(input: CreateWalletInput) {
@@ -187,9 +189,11 @@ export class WalletService {
     const balanceMatches = Money.from({ amount: balance, currency: record.currency.trim() }).equals(
       Money.from({ amount: ledgerBalance, currency: record.currency.trim() }),
     );
+    const consistent = balanceMatches && chainConsistent;
+    if (!consistent) this.metrics?.recordReconciliationMismatch();
     return {
       walletId,
-      consistent: balanceMatches && chainConsistent,
+      consistent,
       chainConsistent,
       ledgerEntryCount: Number(ledger?.entryCount ?? '0'),
       walletBalance: { amount: balance, currency: record.currency.trim() },

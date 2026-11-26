@@ -104,4 +104,17 @@ describe('HTTP API', () => {
     expect(response.headers.get('content-type')).toContain('application/problem+json');
     expect(((await response.json()) as { code: string }).code).toBe('INVALID_PAYLOAD');
   });
+
+  test('exposes Prometheus metrics and checks both database and SQS readiness', async () => {
+    const ready = await fetch(`${baseUrl}/health/ready`);
+    expect(ready.status).toBe(200);
+
+    const response = await fetch(`${baseUrl}/metrics`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/plain');
+    const metrics = await response.text();
+    expect(metrics).toContain('wager_transactions_total');
+    expect(metrics).toContain('wager_outbox_pending_messages');
+    expect(metrics).toContain('wager_dead_letter_queue_visible_messages');
+  });
 });

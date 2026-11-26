@@ -1,10 +1,13 @@
 import {
   ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
+  GetQueueAttributesCommand,
   GetQueueUrlCommand,
   ReceiveMessageCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
+import type { ApplicationMetrics } from '../../application/observability/application-metrics';
+import { logger } from '../../application/observability/logger';
 import { newId } from '../../application/shared/ids';
 import {
   ExternalTransactionConflictError,
@@ -23,6 +26,7 @@ export class SqsTransactionConsumer {
   private readonly abortController = new AbortController();
   private loopPromise?: Promise<void>;
   private queueUrlPromise?: Promise<string>;
+  private deadLetterUrlPromise?: Promise<string>;
 
   constructor(
     private readonly client: SQSClient,
@@ -30,6 +34,7 @@ export class SqsTransactionConsumer {
     private readonly consumerName: string,
     private readonly transactions: WagerTransactionService,
     private readonly env: Env,
+    private readonly metrics?: ApplicationMetrics,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -42,6 +47,35 @@ export class SqsTransactionConsumer {
     this.client.destroy();
   }
 
+  async checkReady(): Promise<void> {
+    await this.client.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: await this.getQueueUrl(),
+        AttributeNames: ['QueueArn'],
+      }),
+    );
+  }
+
+  async getDeadLetterVisibleCount(): Promise<number> {
+    this.deadLetterUrlPromise ??= this.client
+      .send(new GetQueueUrlCommand({ QueueName: this.env.SQS_TRANSACTIONS_DLQ }))
+      .then((result) => {
+        if (!result.QueueUrl) throw new Error('SQS não retornou URL da DLQ de transações');
+        return result.QueueUrl;
+      })
+      .catch((error: unknown) => {
+        this.deadLetterUrlPromise = undefined;
+        throw error;
+      });
+    const result = await this.client.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: await this.deadLetterUrlPromise,
+        AttributeNames: ['ApproximateNumberOfMessages'],
+      }),
+    );
+    return Number(result.Attributes?.ApproximateNumberOfMessages ?? 0);
+  }
+
   /** Exposto para testes de integração sem depender do ciclo de polling. */
   async consumeOne(message: {
     body?: string;
@@ -51,6 +85,7 @@ export class SqsTransactionConsumer {
   }): Promise<boolean> {
     if (!message.body || !message.messageId || !message.receiptHandle) return false;
     let input: SubmitWagerInput | undefined;
+    let phase: 'decode' | 'process' | 'ack' = 'decode';
     try {
       const raw: unknown = JSON.parse(message.body);
       const parsed = transactionMessageSchema.safeParse(raw);
@@ -62,10 +97,23 @@ export class SqsTransactionConsumer {
         money: Money.from(parsed.data.money),
         correlationId,
       };
+      phase = 'process';
       await this.transactions.submitFromQueue(input, {
         consumerName: this.consumerName,
         messageId: message.messageId,
       });
+      if (this.env.FAULT === 'crash_after_commit') {
+        logger.error(
+          {
+            component: 'sqs-transaction-consumer',
+            action: 'fault-crash-after-commit',
+            messageId: message.messageId,
+          },
+          'fault injection: exiting after database commit and before SQS ACK',
+        );
+        process.exit(137);
+      }
+      phase = 'ack';
       await this.client.send(
         new DeleteMessageCommand({
           QueueUrl: await this.getQueueUrl(),
@@ -75,15 +123,19 @@ export class SqsTransactionConsumer {
       return true;
     } catch (error) {
       // Não apagar: o visibility timeout e a redrive policy levam a mensagem à DLQ após o limite.
-      console.error(
-        JSON.stringify({
+      logger.error(
+        {
           component: 'sqs-transaction-consumer',
+          phase,
           messageId: message.messageId,
           error: error instanceof Error ? error.name : 'UnknownError',
           code: error instanceof PermanentQueueMessageError ? error.code : undefined,
-        }),
+        },
+        'transaction message processing failed',
       );
       const receiveCount = Number(message.attributes?.ApproximateReceiveCount) || 1;
+      this.metrics?.recordRetry('sqs');
+      if (receiveCount >= this.env.SQS_MAX_RECEIVE_COUNT) this.metrics?.recordDeadLetter();
       if (
         input &&
         receiveCount >= this.env.SQS_MAX_RECEIVE_COUNT &&
@@ -92,13 +144,14 @@ export class SqsTransactionConsumer {
         try {
           await this.transactions.recordQueueAttemptsExhausted(input);
         } catch (failureError) {
-          console.error(
-            JSON.stringify({
+          logger.error(
+            {
               component: 'sqs-transaction-consumer',
               messageId: message.messageId,
               action: 'record-failed-best-effort',
               error: failureError instanceof Error ? failureError.name : 'UnknownError',
-            }),
+            },
+            'could not persist exhausted transaction state',
           );
         }
       }
@@ -133,11 +186,12 @@ export class SqsTransactionConsumer {
         }
       } catch (error) {
         if (this.abortController.signal.aborted) break;
-        console.error(
-          JSON.stringify({
+        logger.error(
+          {
             component: 'sqs-transaction-consumer',
             error: error instanceof Error ? error.name : 'UnknownError',
-          }),
+          },
+          'SQS poll failed',
         );
         await delay(this.env.WORKER_POLL_INTERVAL_MS, this.abortController.signal);
       }

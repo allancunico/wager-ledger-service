@@ -231,9 +231,9 @@ Contrato implementado: JSON com os mesmos campos de negócio do `POST /transacti
 
 ## 6. Observabilidade
 
-- Logs JSON (pino) com `correlationId`, `messageId`, `transactionId`, `walletId`, `providerId`. Sem payloads financeiros completos.
-- Métricas (`prom-client`, `/metrics`): transações por status, duplicatas detectadas, retries, mensagens em DLQ, conflitos de lock, outbox lag, latência de processamento, divergências de reconciliação.
-- Health: `live` e `ready` (PostgreSQL e SQS).
+- Logs JSON via Pino com `correlationId`, `messageId` (canal SQS), `transactionId`, `walletId`, `providerId` e status. Sem payloads ou valores financeiros completos.
+- Métricas (`prom-client`, `/metrics`): transações por status/canal, replays, retries por worker, entregas à DLQ, conflitos de lock, backlog/idade da outbox, latência transacional, divergências de reconciliação e métricas padrão do processo.
+- Health: `live` não acessa dependências; `ready` confirma PostgreSQL e a fila SQS de entrada.
 
 ## 7. Escolhas de ferramentas
 
@@ -253,7 +253,7 @@ Contrato implementado: JSON com os mesmos campos de negócio do `POST /transacti
 - PostgreSQL e LocalStack reais via **Docker Compose** (`bun run infra:up`), a mesma infra do desenvolvimento. Testcontainers foi descartado pela compatibilidade incerta com o Bun.
 - Isolamento: cada suíte cria um banco próprio (`CREATE DATABASE` a partir de um template já migrado) e filas com nome único.
 - Multi-instância: processos filhos reais (`Bun.spawn`), cada um com porta e `ROLES` próprios, contra o mesmo Postgres e as mesmas filas.
-- Crash entre commit e ack: gancho de falha ativado só por variável de ambiente (ex.: `FAULT=crash_after_commit`, `SIGKILL` nesse ponto). Mecanismo de teste, desligado por padrão.
+- Crash entre commit e ack: gancho de falha ativado só por variável de ambiente (`FAULT=crash_after_commit`), encerra o processo do consumidor nesse ponto. Mecanismo de teste, desligado por padrão.
 - `Clock` injetável para TTL e backoff determinísticos.
 - Invariante final de todos os testes: `wallet.balance == saldo reconstruído pelo ledger`.
 - Infra das filas: script de inicialização do LocalStack no Compose, e não criação na aplicação.
@@ -268,7 +268,7 @@ Contrato implementado: JSON com os mesmos campos de negócio do `POST /transacti
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
 
-Estado do clone: as etapas 1 a 8 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, a etapa 6 publica outbox no SQS FIFO, a etapa 7 consome transações da fila com inbox transacional e a etapa 8 reprocessa referências pendentes com `SKIP LOCKED`. Concorrência entre processos HTTP fica para a etapa 9; as etapas 9 e 10 permanecem no plano.
+Estado do clone: as etapas 1 a 9 estão implementadas; há testes de concorrência no PostgreSQL, entre processos HTTP e recuperação do consumidor após crash entre commit e ack. A etapa 6 publica outbox no SQS FIFO, a etapa 7 consome transações com inbox transacional, a etapa 8 reprocessa referências pendentes com `SKIP LOCKED` e a etapa 9 fornece métricas e readiness para PostgreSQL/SQS. A etapa 10 permanece no plano.
 
 ## 10. Limitações conhecidas
 

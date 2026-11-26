@@ -1,4 +1,5 @@
 import type { Env } from '../../infrastructure/config/env';
+import { logger } from '../observability/logger';
 import { WagerTransactionService } from './wager-transaction-service';
 
 /** Poller independente: pode rodar em cada instância, com SKIP LOCKED no PostgreSQL. */
@@ -28,12 +29,13 @@ export class PendingReferenceWorker {
           this.env.PENDING_REFERENCE_BATCH_SIZE,
         );
       } catch (error) {
-        console.error(
-          JSON.stringify({
+        logger.error(
+          {
             component: 'pending-reference-worker',
             error: error instanceof Error ? error.name : 'UnknownError',
             code: getErrorCode(error),
-          }),
+          },
+          'pending reference batch failed',
         );
       }
       if (processed > 0) continue;

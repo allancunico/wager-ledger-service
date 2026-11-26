@@ -33,6 +33,8 @@ import {
   WagerTransactionRecord,
   WalletRecord,
 } from '../../infrastructure/persistence/records';
+import type { ApplicationMetrics } from '../observability/application-metrics';
+import { logger } from '../observability/logger';
 import type { Clock } from '../shared/clock';
 import { newId } from '../shared/ids';
 import { WalletService } from '../wallets/wallet-service';
@@ -69,6 +71,7 @@ export class WagerTransactionService {
     private readonly orm: MikroORM,
     private readonly clock: Clock,
     env: Env,
+    private readonly metrics?: ApplicationMetrics,
   ) {
     this.lockTimeoutMs = env.LOCK_TIMEOUT_MS;
     this.pendingTtlSeconds = env.PENDING_REFERENCE_TTL_SECONDS;
@@ -151,6 +154,7 @@ export class WagerTransactionService {
           [now, expiredBefore],
         );
         if (!candidate) return false;
+        this.metrics?.recordRetry('pending_reference');
 
         const record = await em.findOneOrFail(WagerTransactionRecord, { id: candidate.id });
         const transaction = wagerTransactionFromRecord(record);
@@ -232,69 +236,72 @@ export class WagerTransactionService {
       createdAt: now,
     });
 
-    return this.orm.em.fork().transactional(async (em) => {
-      let inboxMessage: InboxMessage | undefined;
-      if (inbox) {
-        const receivedAt = this.clock.now();
-        const insertedInbox = await em.execute<{ messageId: string }[]>(
-          `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
+    const startedAt = performance.now();
+    const result = await this.orm.em
+      .fork()
+      .transactional<TransactionResult & { duplicateMessage?: boolean }>(async (em) => {
+        let inboxMessage: InboxMessage | undefined;
+        if (inbox) {
+          const receivedAt = this.clock.now();
+          const insertedInbox = await em.execute<{ messageId: string }[]>(
+            `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
            values (?, ?, ?, ?, null) on conflict do nothing returning message_id as "messageId"`,
-          [inbox.consumerName, inbox.messageId, payloadHash, receivedAt],
-        );
-        if (insertedInbox.length === 0) {
-          const existing = await em.findOne(InboxMessageRecord, {
+            [inbox.consumerName, inbox.messageId, payloadHash, receivedAt],
+          );
+          if (insertedInbox.length === 0) {
+            const existing = await em.findOne(InboxMessageRecord, {
+              consumerName: inbox.consumerName,
+              messageId: inbox.messageId,
+            });
+            if (!existing || existing.payloadHash !== payloadHash)
+              throw new InboxMessageConflictError();
+            return { httpStatus: 200, body: { duplicateMessage: true }, duplicateMessage: true };
+          }
+          inboxMessage = InboxMessage.receive({
             consumerName: inbox.consumerName,
             messageId: inbox.messageId,
+            payloadHash,
+            receivedAt,
           });
-          if (!existing || existing.payloadHash !== payloadHash)
-            throw new InboxMessageConflictError();
-          return { httpStatus: 200, body: { duplicateMessage: true }, duplicateMessage: true };
         }
-        inboxMessage = InboxMessage.receive({
-          consumerName: inbox.consumerName,
-          messageId: inbox.messageId,
-          payloadHash,
-          receivedAt,
+        const finish = async (result: TransactionResult) => {
+          if (inbox) {
+            if (!inboxMessage) throw new Error('Inbox não foi registrado nesta transação');
+            inboxMessage.markProcessed(this.clock.now());
+            await em.nativeUpdate(
+              InboxMessageRecord,
+              { consumerName: inbox.consumerName, messageId: inbox.messageId },
+              { processedAt: inboxMessage.processedAt },
+            );
+          }
+          return result;
+        };
+        // Fast replay path. The unique constraints below remain the authority under races.
+        const byKey = await em.findOne(WagerTransactionRecord, {
+          providerId: input.providerId,
+          idempotencyKey: input.idempotencyKey,
         });
-      }
-      const finish = async (result: TransactionResult) => {
-        if (inbox) {
-          if (!inboxMessage) throw new Error('Inbox não foi registrado nesta transação');
-          inboxMessage.markProcessed(this.clock.now());
-          await em.nativeUpdate(
-            InboxMessageRecord,
-            { consumerName: inbox.consumerName, messageId: inbox.messageId },
-            { processedAt: inboxMessage.processedAt },
-          );
+        if (byKey) return finish(this.replay(byKey, payloadHash));
+        const byExternalId = await em.findOne(WagerTransactionRecord, {
+          providerId: input.providerId,
+          externalTransactionId: input.externalTransactionId,
+        });
+        if (byExternalId) {
+          if (byExternalId.idempotencyKey === input.idempotencyKey) {
+            return finish(this.replay(byExternalId, payloadHash));
+          }
+          throw new ExternalTransactionConflictError();
         }
-        return result;
-      };
-      // Fast replay path. The unique constraints below remain the authority under races.
-      const byKey = await em.findOne(WagerTransactionRecord, {
-        providerId: input.providerId,
-        idempotencyKey: input.idempotencyKey,
-      });
-      if (byKey) return finish(this.replay(byKey, payloadHash));
-      const byExternalId = await em.findOne(WagerTransactionRecord, {
-        providerId: input.providerId,
-        externalTransactionId: input.externalTransactionId,
-      });
-      if (byExternalId) {
-        if (byExternalId.idempotencyKey === input.idempotencyKey) {
-          return finish(this.replay(byExternalId, payloadHash));
-        }
-        throw new ExternalTransactionConflictError();
-      }
 
-      await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
-      // Acquire the wallet lock before inserting the FK-backed transaction row. This avoids
-      // converting a FK KEY SHARE lock to FOR UPDATE while competing requests hold the same FK.
-      const walletRecord = await WalletService.lockWallet(em, input.walletId);
-      if (!walletRecord) throw new WalletMissingError();
-      const wallet = walletFromRecord(walletRecord);
+        await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
+        // Acquire the wallet lock before inserting the FK-backed transaction row. This avoids
+        // converting a FK KEY SHARE lock to FOR UPDATE while competing requests hold the same FK.
+        const walletRecord = await WalletService.lockWallet(em, input.walletId);
+        if (!walletRecord) throw new WalletMissingError();
+        const wallet = walletFromRecord(walletRecord);
 
-      const inserted = await em.execute<{ id: string }[]>(
-        `insert into wager_transactions (
+        const inserted = await em.execute<{ id: string }[]>(
+          `insert into wager_transactions (
            id, provider_id, external_transaction_id, idempotency_key, payload_hash,
            wallet_id, player_id, round_id, game_id, kind, amount, currency,
            reference_external_transaction_id, reference_transaction_id, status, failure_code,
@@ -302,80 +309,114 @@ export class WagerTransactionService {
            reference_attempts, next_reference_attempt_at
          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, ?, null, ?, null, null, null, 0, null)
          on conflict do nothing returning id`,
-        [
-          transaction.id,
-          transaction.providerId,
-          transaction.externalTransactionId,
-          transaction.idempotencyKey,
-          transaction.payloadHash,
-          transaction.walletId,
-          transaction.playerId,
-          transaction.roundId,
-          transaction.gameId,
-          transaction.kind,
-          transaction.money.amount,
-          transaction.money.currency,
-          transaction.referenceExternalTransactionId ?? null,
-          transaction.status,
-          transaction.createdAt,
-        ],
-      );
-      if (inserted.length === 0) {
-        const racedKey = await em.findOne(WagerTransactionRecord, {
-          providerId: input.providerId,
-          idempotencyKey: input.idempotencyKey,
-        });
-        if (racedKey) return finish(this.replay(racedKey, payloadHash));
-        const racedExternal = await em.findOne(WagerTransactionRecord, {
-          providerId: input.providerId,
-          externalTransactionId: input.externalTransactionId,
-        });
-        if (racedExternal) throw new ExternalTransactionConflictError();
-        throw new Error('Conflito de unicidade sem transação correspondente');
-      }
-
-      let reference: WagerTransaction | undefined;
-      if (transaction.referenceExternalTransactionId !== undefined) {
-        const referenceRecord = await em.findOne(WagerTransactionRecord, {
-          providerId: transaction.providerId,
-          externalTransactionId: transaction.referenceExternalTransactionId,
-        });
-        if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
-      }
-      const referenceAlreadyReversed = reference
-        ? await this.referenceAlreadyReversed(em, reference.id)
-        : false;
-      const outcome = processTransaction({
-        transaction,
-        wallet,
-        reference,
-        referenceAlreadyReversed,
-        now,
-        newEntryId: newId,
-        pendingReferencePolicy: this.pendingPolicy,
-      });
-
-      if (outcome.type === 'PROCESSED' && outcome.entry) {
-        await em.nativeUpdate(
-          WalletRecord,
-          { id: wallet.id },
-          {
-            balance: wallet.balance.amount,
-            version: wallet.version,
-            updatedAt: wallet.updatedAt,
-          },
+          [
+            transaction.id,
+            transaction.providerId,
+            transaction.externalTransactionId,
+            transaction.idempotencyKey,
+            transaction.payloadHash,
+            transaction.walletId,
+            transaction.playerId,
+            transaction.roundId,
+            transaction.gameId,
+            transaction.kind,
+            transaction.money.amount,
+            transaction.money.currency,
+            transaction.referenceExternalTransactionId ?? null,
+            transaction.status,
+            transaction.createdAt,
+          ],
         );
-        await em.insert(LedgerEntryRecord, ledgerEntryToRecord(outcome.entry));
-      }
-      await em.nativeUpdate(
-        WagerTransactionRecord,
-        { id: transaction.id },
-        wagerTransactionToRecord(transaction),
-      );
-      await this.enqueueOutcomeEvents(em, transaction, wallet, outcome, input.correlationId, now);
+        if (inserted.length === 0) {
+          const racedKey = await em.findOne(WagerTransactionRecord, {
+            providerId: input.providerId,
+            idempotencyKey: input.idempotencyKey,
+          });
+          if (racedKey) return finish(this.replay(racedKey, payloadHash));
+          const racedExternal = await em.findOne(WagerTransactionRecord, {
+            providerId: input.providerId,
+            externalTransactionId: input.externalTransactionId,
+          });
+          if (racedExternal) throw new ExternalTransactionConflictError();
+          throw new Error('Conflito de unicidade sem transação correspondente');
+        }
 
-      return finish(resultFor(transaction, false));
-    });
+        let reference: WagerTransaction | undefined;
+        if (transaction.referenceExternalTransactionId !== undefined) {
+          const referenceRecord = await em.findOne(WagerTransactionRecord, {
+            providerId: transaction.providerId,
+            externalTransactionId: transaction.referenceExternalTransactionId,
+          });
+          if (referenceRecord) reference = wagerTransactionFromRecord(referenceRecord);
+        }
+        const referenceAlreadyReversed = reference
+          ? await this.referenceAlreadyReversed(em, reference.id)
+          : false;
+        const outcome = processTransaction({
+          transaction,
+          wallet,
+          reference,
+          referenceAlreadyReversed,
+          now,
+          newEntryId: newId,
+          pendingReferencePolicy: this.pendingPolicy,
+        });
+
+        if (outcome.type === 'PROCESSED' && outcome.entry) {
+          await em.nativeUpdate(
+            WalletRecord,
+            { id: wallet.id },
+            {
+              balance: wallet.balance.amount,
+              version: wallet.version,
+              updatedAt: wallet.updatedAt,
+            },
+          );
+          await em.insert(LedgerEntryRecord, ledgerEntryToRecord(outcome.entry));
+        }
+        await em.nativeUpdate(
+          WagerTransactionRecord,
+          { id: transaction.id },
+          wagerTransactionToRecord(transaction),
+        );
+        await this.enqueueOutcomeEvents(em, transaction, wallet, outcome, input.correlationId, now);
+
+        return finish(resultFor(transaction, false));
+      })
+      .catch((error: unknown) => {
+        const sqlstate = findSqlState(error);
+        if (sqlstate === '55P03' || sqlstate === '40P01') {
+          this.metrics?.recordLockConflict(sqlstate);
+        }
+        this.metrics?.observeTransactionDuration(
+          inbox ? 'sqs' : 'http',
+          (performance.now() - startedAt) / 1000,
+        );
+        throw error;
+      });
+    const channel = inbox ? 'sqs' : 'http';
+    const status = result.duplicateMessage
+      ? 'DUPLICATE_MESSAGE'
+      : String(result.body.status ?? result.body.code ?? 'UNKNOWN');
+    this.metrics?.recordTransaction(status, channel);
+    if (result.body.idempotentReplay === true || result.duplicateMessage === true) {
+      this.metrics?.recordReplay(channel);
+    }
+    this.metrics?.observeTransactionDuration(channel, (performance.now() - startedAt) / 1000);
+    logger.info(
+      {
+        component: 'wager-transaction',
+        channel,
+        correlationId: input.correlationId,
+        ...(inbox ? { messageId: inbox.messageId } : {}),
+        transactionId: result.body.transactionId,
+        walletId: input.walletId,
+        providerId: input.providerId,
+        status,
+      },
+      'transaction handled',
+    );
+    return result;
   }
 
   async getByExternalId(providerId: string, externalTransactionId: string) {
@@ -430,6 +471,19 @@ export class WagerTransactionService {
   private async enqueue(em: EntityManager, event: Parameters<typeof OutboxMessage.enqueue>[0]) {
     await em.insert(OutboxMessageRecord, outboxMessageToRecord(OutboxMessage.enqueue(event)));
   }
+}
+
+function findSqlState(error: unknown): string {
+  let current = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== 'object' || current === null) return '';
+    const candidate = current as { code?: unknown; cause?: unknown; originalError?: unknown };
+    if (typeof candidate.code === 'string' && /^[0-9A-Z]{5}$/.test(candidate.code)) {
+      return candidate.code;
+    }
+    current = candidate.cause ?? candidate.originalError;
+  }
+  return '';
 }
 
 export class WalletMissingError extends Error {}

@@ -2,6 +2,8 @@ import type { EntityManager, MikroORM } from '@mikro-orm/postgresql';
 import { DEFAULT_OUTBOX_BACKOFF, OutboxMessage } from '../../domain/messaging/outbox-message';
 import type { Env } from '../../infrastructure/config/env';
 import type { EventQueuePort } from '../../infrastructure/messaging/sqs-event-queue';
+import type { ApplicationMetrics } from '../observability/application-metrics';
+import { logger } from '../observability/logger';
 import type { Clock } from '../shared/clock';
 import { newId } from '../shared/ids';
 
@@ -24,6 +26,7 @@ export class OutboxPublisher {
     private readonly clock: Clock,
     private readonly batchSize: number,
     private readonly leaseSeconds: number,
+    private readonly metrics?: ApplicationMetrics,
   ) {}
 
   /** Claims a short lease, publishes outside the database transaction, then records the result. */
@@ -82,6 +85,7 @@ export class OutboxPublisher {
         body: JSON.stringify(row.payload),
       });
     } catch (error) {
+      this.metrics?.recordRetry('outbox');
       const now = this.clock.now();
       const message = OutboxMessage.rehydrate({
         id: row.id,
@@ -100,13 +104,14 @@ export class OutboxPublisher {
           where id = ? and claim_token = ? and published_at is null`,
         [message.attempts, message.nextAttemptAt, row.id, claimToken],
       );
-      console.warn(
-        JSON.stringify({
+      logger.warn(
+        {
           component: 'outbox-publisher',
           eventId: row.id,
           attempt: message.attempts,
           error: error instanceof Error ? error.name : 'UnknownError',
-        }),
+        },
+        'outbox publish failed',
       );
       return;
     }
@@ -145,11 +150,12 @@ export class OutboxPublisherWorker {
       try {
         claimed = await this.publisher.publishBatch();
       } catch (error) {
-        console.error(
-          JSON.stringify({
+        logger.error(
+          {
             component: 'outbox-publisher',
             error: error instanceof Error ? error.name : 'UnknownError',
-          }),
+          },
+          'outbox batch failed',
         );
       }
       if (claimed > 0) continue;
