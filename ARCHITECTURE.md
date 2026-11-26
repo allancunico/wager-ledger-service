@@ -223,8 +223,10 @@ Migrations versionadas e reversíveis (Migrator do MikroORM), com SQL escrito à
 - Mesmo use case da entrada HTTP.
 - Dedup por inbox persistente `(consumerName, messageId)`, na mesma transação financeira. O inbox deduplica a mensagem, a idempotency key deduplica a operação de negócio.
 - `ack` somente após o commit.
-- Erro de negócio: terminal, ack. Transitório: retry com backoff. Permanente: DLQ, após limite de tentativas.
+- Erro de negócio que virou `REJECTED`: terminal, ack. Erros operacionais e payloads permanentemente inválidos não são apagados; a redrive policy encaminha à DLQ após o limite de entregas. A política de visibility timeout da fila regula o intervalo entre retries.
 - `SIGTERM`: concluir as mensagens em andamento ou devolver a visibilidade.
+
+Contrato implementado: JSON com os mesmos campos de negócio do `POST /transactions`, mais `idempotencyKey` no corpo e `correlationId` opcional. `messageId` vem do SQS. O consumer `wager-transactions-v1` registra a mensagem no inbox e executa `WagerTransactionService` na mesma transação SQL; só executa `DeleteMessage` depois do commit. Uma repetição de mesmo `consumerName/messageId` e hash é reconhecida no inbox e apagada sem novo débito. Mesmo ID com outro hash é tratado como mensagem inválida e segue para a DLQ pela redrive policy.
 
 ## 6. Observabilidade
 
@@ -265,7 +267,7 @@ Migrations versionadas e reversíveis (Migrator do MikroORM), com SQL escrito à
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
 
-Estado do clone: as etapas 1 a 6 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, e a etapa 6 publica outbox no SQS FIFO. Concorrência entre processos HTTP fica para a etapa 9; as etapas 7 a 10 permanecem no plano.
+Estado do clone: as etapas 1 a 7 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, a etapa 6 publica outbox no SQS FIFO e a etapa 7 consome transações da fila com inbox transacional. Concorrência entre processos HTTP fica para a etapa 9; as etapas 8 a 10 permanecem no plano.
 
 ## 10. Limitações conhecidas
 

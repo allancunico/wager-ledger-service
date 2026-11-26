@@ -5,12 +5,14 @@ import {
   WagerTransactionRejected,
   WalletBalanceChanged,
 } from '../../domain/messaging/events';
+import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { Money } from '../../domain/shared/money';
 import { hashPayload } from '../../domain/wagering/payload-hash';
 import { PendingReferencePolicy } from '../../domain/wagering/pending-reference-policy';
 import { processTransaction } from '../../domain/wagering/wager-rules';
 import {
+  FailureCode,
   WagerTransaction,
   WagerTransactionKind,
   WagerTransactionStatus,
@@ -25,6 +27,7 @@ import {
   walletFromRecord,
 } from '../../infrastructure/persistence/mappers';
 import {
+  InboxMessageRecord,
   LedgerEntryRecord,
   OutboxMessageRecord,
   WagerTransactionRecord,
@@ -36,6 +39,7 @@ import { WalletService } from '../wallets/wallet-service';
 
 export class IdempotencyConflictError extends Error {}
 export class ExternalTransactionConflictError extends Error {}
+export class InboxMessageConflictError extends Error {}
 
 export interface SubmitWagerInput {
   providerId: string;
@@ -77,6 +81,59 @@ export class WagerTransactionService {
   }
 
   async submit(input: SubmitWagerInput): Promise<TransactionResult> {
+    return this.submitInternal(input);
+  }
+
+  async submitFromQueue(
+    input: SubmitWagerInput,
+    message: { consumerName: string; messageId: string },
+  ): Promise<TransactionResult & { duplicateMessage?: boolean }> {
+    return this.submitInternal(input, message);
+  }
+
+  /** Persiste FAILED em melhor esforço quando o SQS já está na última entrega. */
+  async recordQueueAttemptsExhausted(input: SubmitWagerInput): Promise<void> {
+    const payloadHash = hashPayload(input);
+    const now = this.clock.now();
+    await this.orm.em.fork().transactional(async (em) => {
+      const existing = await em.findOne(WagerTransactionRecord, {
+        providerId: input.providerId,
+        idempotencyKey: input.idempotencyKey,
+      });
+      if (existing) return;
+      const sameExternal = await em.findOne(WagerTransactionRecord, {
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+      });
+      if (sameExternal) return;
+
+      await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
+      const walletRecord = await WalletService.lockWallet(em, input.walletId);
+      if (!walletRecord) return;
+      const failed = WagerTransaction.create({
+        id: newId(),
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+        idempotencyKey: input.idempotencyKey,
+        payloadHash,
+        walletId: input.walletId,
+        playerId: input.playerId,
+        roundId: input.roundId,
+        gameId: input.gameId,
+        kind: input.kind,
+        money: input.money,
+        referenceExternalTransactionId: input.referenceExternalTransactionId,
+        createdAt: now,
+      });
+      failed.fail(FailureCode.ProcessingAttemptsExhausted, now);
+      await em.insert(WagerTransactionRecord, wagerTransactionToRecord(failed));
+    });
+  }
+
+  private async submitInternal(
+    input: SubmitWagerInput,
+    inbox?: { consumerName: string; messageId: string },
+  ): Promise<TransactionResult & { duplicateMessage?: boolean }> {
     const payloadHash = hashPayload(input);
     const now = this.clock.now();
     const transaction = WagerTransaction.create({
@@ -96,19 +153,55 @@ export class WagerTransactionService {
     });
 
     return this.orm.em.fork().transactional(async (em) => {
+      let inboxMessage: InboxMessage | undefined;
+      if (inbox) {
+        const receivedAt = this.clock.now();
+        const insertedInbox = await em.execute<{ messageId: string }[]>(
+          `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
+           values (?, ?, ?, ?, null) on conflict do nothing returning message_id as "messageId"`,
+          [inbox.consumerName, inbox.messageId, payloadHash, receivedAt],
+        );
+        if (insertedInbox.length === 0) {
+          const existing = await em.findOne(InboxMessageRecord, {
+            consumerName: inbox.consumerName,
+            messageId: inbox.messageId,
+          });
+          if (!existing || existing.payloadHash !== payloadHash)
+            throw new InboxMessageConflictError();
+          return { httpStatus: 200, body: { duplicateMessage: true }, duplicateMessage: true };
+        }
+        inboxMessage = InboxMessage.receive({
+          consumerName: inbox.consumerName,
+          messageId: inbox.messageId,
+          payloadHash,
+          receivedAt,
+        });
+      }
+      const finish = async (result: TransactionResult) => {
+        if (inbox) {
+          if (!inboxMessage) throw new Error('Inbox não foi registrado nesta transação');
+          inboxMessage.markProcessed(this.clock.now());
+          await em.nativeUpdate(
+            InboxMessageRecord,
+            { consumerName: inbox.consumerName, messageId: inbox.messageId },
+            { processedAt: inboxMessage.processedAt },
+          );
+        }
+        return result;
+      };
       // Fast replay path. The unique constraints below remain the authority under races.
       const byKey = await em.findOne(WagerTransactionRecord, {
         providerId: input.providerId,
         idempotencyKey: input.idempotencyKey,
       });
-      if (byKey) return this.replay(byKey, payloadHash);
+      if (byKey) return finish(this.replay(byKey, payloadHash));
       const byExternalId = await em.findOne(WagerTransactionRecord, {
         providerId: input.providerId,
         externalTransactionId: input.externalTransactionId,
       });
       if (byExternalId) {
         if (byExternalId.idempotencyKey === input.idempotencyKey) {
-          return this.replay(byExternalId, payloadHash);
+          return finish(this.replay(byExternalId, payloadHash));
         }
         throw new ExternalTransactionConflictError();
       }
@@ -152,7 +245,7 @@ export class WagerTransactionService {
           providerId: input.providerId,
           idempotencyKey: input.idempotencyKey,
         });
-        if (racedKey) return this.replay(racedKey, payloadHash);
+        if (racedKey) return finish(this.replay(racedKey, payloadHash));
         const racedExternal = await em.findOne(WagerTransactionRecord, {
           providerId: input.providerId,
           externalTransactionId: input.externalTransactionId,
@@ -201,7 +294,7 @@ export class WagerTransactionService {
       );
       await this.enqueueOutcomeEvents(em, transaction, wallet, outcome, input.correlationId, now);
 
-      return resultFor(transaction, false);
+      return finish(resultFor(transaction, false));
     });
   }
 

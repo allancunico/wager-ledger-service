@@ -16,6 +16,10 @@ import type { Env } from './infrastructure/config/env';
 import { loadEnv } from './infrastructure/config/env';
 import { createOrm } from './infrastructure/database/orm';
 import { createSqsEventQueue } from './infrastructure/messaging/sqs-event-queue';
+import {
+  createSqsTransactionConsumerClient,
+  SqsTransactionConsumer,
+} from './infrastructure/messaging/sqs-transaction-consumer';
 import { ApiExceptionFilter } from './interfaces/http/api-exception.filter';
 import {
   AuthGuard,
@@ -82,6 +86,18 @@ class OrmLifecycle {
       useFactory: (publisher: OutboxPublisher, env: Env) =>
         new OutboxPublisherWorker(publisher, env),
       inject: [OutboxPublisher, ENV],
+    },
+    {
+      provide: SqsTransactionConsumer,
+      useFactory: (service: WagerTransactionService, env: Env) =>
+        new SqsTransactionConsumer(
+          createSqsTransactionConsumerClient(env),
+          env.SQS_TRANSACTIONS_QUEUE,
+          env.SQS_CONSUMER_NAME,
+          service,
+          env,
+        ),
+      inject: [WAGER_TRANSACTION_SERVICE, ENV],
     },
     {
       provide: WALLET_SERVICE,
