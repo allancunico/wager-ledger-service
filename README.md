@@ -1,99 +1,90 @@
 # Wager Ledger Service
 
-Serviço financeiro distribuído que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) de múltiplos provedores, com entrega at-least-once, idempotência persistente e consistência entre saldo e ledger.
+Serviço backend para transações financeiras de apostas (**BET**, **WIN**, **LOSS**, **REFUND**, **ROLLBACK**). Mantém saldo e ledger consistentes com idempotência persistente, PostgreSQL e processamento assíncrono por SQS. Não possui front end.
 
-Stack: Bun 1.x, TypeScript estrito, NestJS, MikroORM, PostgreSQL, AWS SQS (LocalStack).
+Stack: Bun 1.x, TypeScript estrito, NestJS, MikroORM, PostgreSQL 16, SQS via LocalStack e Docker Compose. As decisões e limitações estão em [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-As decisões de arquitetura, o schema e as limitações estão em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+## Executar localmente
 
-## Pré-requisitos
+Requisitos: Bun 1.x, Docker e Docker Compose. No PowerShell:
 
-- [Bun](https://bun.sh) 1.x
-- Docker e Docker Compose
+    bun install
+    cp .env.example .env
+    bun run infra:up
+    bun run migrate:up
+    bun run start
 
-## Setup
+Ajuste as variáveis em .env conforme seu ambiente; substitua LOCALSTACK_AUTH_TOKEN=seu_token_aqui por um token válido para sua instalação do LocalStack. O Compose publica PostgreSQL em localhost:5433 e LocalStack em localhost:4566; o script de inicialização cria as filas SQS.
 
-```bash
-bun install
-cp .env.example .env
-bun run infra:up        # sobe PostgreSQL e LocalStack (cria as 3 filas SQS)
-```
-
-O PostgreSQL do Compose é publicado em `localhost:5433` para evitar conflito com instalações locais que já usam a porta `5432`. A URL padrão está em `.env.example`.
+As migrations precisam ser aplicadas antes de iniciar a API. O serviço usa por padrão os papéis api, consumer e workers. Para interromper a infraestrutura, bun run infra:down remove também o volume do PostgreSQL e apaga os dados locais.
 
 ## Comandos
 
-| Comando | O que faz |
+| Comando | Uso |
 |---|---|
-| `bun run start` | sobe a aplicação (papéis definidos por `ROLES`) |
-| `bun run dev` | idem, com reinício automático |
-| `bun run lint` | Biome (lint e formatação) |
-| `bun run format` | formata o código |
-| `bun run typecheck` | `tsc --noEmit` |
-| `bun run spike` | spike da etapa 1 (precisa de um PostgreSQL acessível, ver abaixo) |
-| `bun run infra:up` / `infra:down` | sobe / derruba a infra local |
-| `bun run test:unit` | testes unitários do domínio e round-trip dos mappers (não precisam de banco nem de Docker) |
-| `bun run test:integration` | migrations, constraints, API e publisher com PostgreSQL e LocalStack (banco temporário) |
-| `bun run test:concurrency` | concorrência no PostgreSQL entre instâncias independentes do serviço |
-| `bun run migrate:up` | aplica as migrations |
-| `bun run migrate:down` | reverte a migration mais recente |
-| `bun run migrate:down -- --all` | reverte todas as migrations |
+| bun run start / bun run dev | Inicia a aplicação / inicia com reinício automático |
+| bun run migrate:up | Aplica migrations pendentes |
+| bun run migrate:down | Reverte a migration mais recente |
+| bun run migrate:down -- --all | Reverte todas as migrations |
+| bun run test:unit | Testes de domínio e mappers; não precisa de serviços externos |
+| bun run test:integration | Testes com PostgreSQL e LocalStack |
+| bun run test:concurrency | Concorrência com PostgreSQL e instâncias independentes |
+| bun run typecheck / bun run lint | TypeScript / Biome |
+| bun run infra:up / bun run infra:down | Sobe / remove a infraestrutura local |
 
-Os testes de integração usam `TEST_DATABASE_ADMIN_URL` se definida; caso contrário, usam `DATABASE_URL` como conexão administrativa para criar um banco isolado. A role precisa poder criar e remover bancos. `test:integration` requer PostgreSQL e LocalStack acessíveis; `test:concurrency` requer PostgreSQL.
+Os testes de integração e concorrência criam bancos temporários e os removem ao terminar. A conexão indicada por TEST_DATABASE_ADMIN_URL ou, na ausência dela, DATABASE_URL precisa permitir criar e remover bancos. Integração também precisa do LocalStack acessível pelas variáveis AWS em .env.
 
-## API HTTP (etapa 4)
+## API
 
-Antes da primeira execução, aplique as migrations:
+A API escuta em http://localhost:3000. Valores monetários são enviados como strings decimais.
 
-```bash
-bun run migrate:up
-bun run start
-```
+Criar uma wallet:
 
-Crie uma wallet com saldo inicial exato (o valor é sempre string decimal):
+    POST /wallets
+    Content-Type: application/json
 
-```http
-POST /wallets
-Content-Type: application/json
+    {"playerId":"<uuid>","initialBalance":{"amount":"100.00","currency":"BRL"}}
 
-{"playerId":"<uuid>","initialBalance":{"amount":"100.00","currency":"BRL"}}
-```
+Submeter uma transação; Idempotency-Key é obrigatório:
 
-Submeta uma transação com `Idempotency-Key`:
+    POST /transactions
+    Content-Type: application/json
+    Idempotency-Key: provedor-a:ext-123
 
-```http
-POST /transactions
-Content-Type: application/json
-Idempotency-Key: provedor-123
+    {"providerId":"provedor-a","externalTransactionId":"ext-123","playerId":"<uuid>","walletId":"<uuid>","roundId":"rodada-1","gameId":"jogo-1","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}
 
-{"providerId":"provedor-a","externalTransactionId":"ext-123","playerId":"<uuid>","walletId":"<uuid>","roundId":"rodada-1","gameId":"jogo-1","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}
-```
+Rotas disponíveis (a submissão também está exposta em /wagering/transactions):
 
-Consultas disponíveis: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`. Erros usam `application/problem+json`. A autenticação está desligada pelo adaptador no-op.
+- GET /wallets/:walletId
+- GET /wallets/:walletId/ledger?limit=50&cursor=...
+- POST /wallets/:walletId/reconciliation
+- GET /transactions/:transactionId
+- GET /transactions/by-external/:providerId/:externalTransactionId
+- GET /providers/:providerId/wagering/transactions/:externalTransactionId
 
-O publisher de eventos e o worker de `PENDING_REFERENCE` usam o papel `workers`. O consumidor de entrada usa o papel `consumer`, lê `wager-transactions.fifo` e espera corpos JSON com os campos da API mais `idempotencyKey` no corpo (a mensagem SQS fornece o `messageId`). Inbox e efeitos financeiros são confirmados na mesma transação PostgreSQL; a mensagem só é apagada depois do commit. Falhas não apagadas são repetidas pelo visibility timeout e a redrive policy encaminha mensagens para a DLQ após cinco entregas. O reprocessador de referências usa `FOR UPDATE SKIP LOCKED`, TTL/backoff configuráveis e o mesmo processamento financeiro da entrada original. O endpoint `/metrics` expõe métricas Prometheus e `/health/ready` verifica PostgreSQL e SQS. Os testes de concorrência entre processos HTTP e de recuperação após crash cobrem as garantias multi-instância.
+A submissão retorna 201 quando processada, 200 em replay processado, 202 quando aguarda referência e 422 para rejeição de negócio. Payload inválido retorna 400, conflitos de idempotência 409, recurso ausente 404 e falhas transitórias 503. Erros usam application/problem+json.
 
-## Papéis do processo
+## Mensageria e operação
 
-Um mesmo código sobe até três papéis, escolhidos por `ROLES` (separados por vírgula, padrão: todos):
+A fila de entrada wager-transactions.fifo recebe este envelope. O messageId dentro do corpo é a chave persistente do inbox; o identificador atribuído pelo SQS é metadado de transporte.
 
-- `api`: API HTTP
-- `consumer`: consumidor da fila `wager-transactions.fifo`
-- `workers`: publisher da outbox e reprocessador de `PENDING_REFERENCE`
+    {
+      "messageId": "msg-123",
+      "type": "WagerTransactionRequested",
+      "occurredAt": "2026-07-29T15:00:00.000Z",
+      "data": {
+        "providerId": "provedor-a",
+        "externalTransactionId": "ext-123",
+        "idempotencyKey": "provedor-a:ext-123",
+        "playerId": "<uuid>",
+        "walletId": "<uuid>",
+        "roundId": "rodada-1",
+        "gameId": "jogo-1",
+        "kind": "BET",
+        "money": {"amount":"25.00","currency":"BRL"}
+      }
+    }
 
-```bash
-ROLES=api PORT=3101 bun run start
-curl http://localhost:3101/health/live
-```
+GET /health/live indica que o processo está ativo. GET /health/ready verifica PostgreSQL, fila de entrada e DLQ/redrive, e fila de eventos da outbox. GET /metrics expõe métricas Prometheus.
 
-Para várias instâncias contra a mesma infra: `docker compose --profile app up --scale app=3`.
-
-## Spike
-
-`bun run spike` valida o Nest, o MikroORM e os locks do PostgreSQL no Bun. Por padrão conecta em `postgres://wager@127.0.0.1:5432/wager`; use `SPIKE_DATABASE_URL` para apontar outro banco. Com a infra do Compose no ar, use:
-
-```bash
-SPIKE_DATABASE_URL=postgres://wager:wager@localhost:5432/wager bun run spike
-```
-
-O spike cria e remove tabelas com prefixo `spike_`. Os resultados estão na seção 11 do `ARCHITECTURE.md`.
+A autenticação está desligada pelo adaptador no-op. Para executar três instâncias no Compose, aplique as migrations primeiro e rode docker compose --profile app up --build --scale app=3.
