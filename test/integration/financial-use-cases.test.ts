@@ -9,6 +9,7 @@ import { Money } from '../../src/domain/shared/money';
 import { WagerTransactionKind } from '../../src/domain/wagering/wager-transaction';
 import { loadEnv } from '../../src/infrastructure/config/env';
 import {
+  InboxMessageRecord,
   LedgerEntryRecord,
   OutboxMessageRecord,
   WagerTransactionRecord,
@@ -124,6 +125,61 @@ describe('financial use cases', () => {
         aggregateId: result.body.transactionId as string,
       }),
     ).toBe(1);
+  });
+
+  test('rolls back inbox, transaction, balance, ledger, and outbox when persistence fails mid-flight', async () => {
+    const playerId = uuidv7();
+    const wallet = await wallets.create({
+      playerId,
+      initialBalance: Money.from({ amount: '100.00', currency: 'BRL' }),
+    });
+    const input = wagerInput({
+      playerId,
+      walletId: wallet.id,
+      externalTransactionId: uuidv7(),
+    });
+    const consumerName = 'atomicity-integration-test';
+    const messageId = uuidv7();
+    const em = database.orm.em.fork();
+    const ledgerBefore = await em.count(LedgerEntryRecord, { walletId: wallet.id });
+    const outboxBefore = await em.count(OutboxMessageRecord, { groupKey: wallet.id });
+
+    await em.execute(`
+      create function fail_target_outbox_for_test() returns trigger language plpgsql as $$
+      begin
+        if new.payload #>> '{data,externalTransactionId}' = '${input.externalTransactionId}' then
+          raise exception 'forced outbox persistence failure';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger fail_target_outbox_for_test
+        before insert on outbox_messages
+        for each row execute function fail_target_outbox_for_test();
+    `);
+
+    try {
+      await expect(
+        transactions.submitFromQueue(input, { consumerName, messageId }),
+      ).rejects.toThrow('forced outbox persistence failure');
+    } finally {
+      await em.execute('drop trigger if exists fail_target_outbox_for_test on outbox_messages');
+      await em.execute('drop function if exists fail_target_outbox_for_test()');
+    }
+
+    const savedWallet = await wallets.get(wallet.id);
+    expect(savedWallet.balance.amount).toBe('100.00');
+    expect(savedWallet.version).toBe(1);
+    expect(await em.count(LedgerEntryRecord, { walletId: wallet.id })).toBe(ledgerBefore);
+    expect(await em.count(OutboxMessageRecord, { groupKey: wallet.id })).toBe(outboxBefore);
+    expect(await em.count(InboxMessageRecord, { consumerName, messageId })).toBe(0);
+    expect(
+      await em.count(WagerTransactionRecord, {
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+      }),
+    ).toBe(0);
+    expect((await wallets.reconcile(wallet.id)).consistent).toBe(true);
   });
 
   test('allows one REFUND and one ROLLBACK per reference, but rejects duplicates of each kind', async () => {

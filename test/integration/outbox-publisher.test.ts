@@ -160,6 +160,93 @@ describe('outbox publisher', () => {
         .count(OutboxMessageRecord, { groupKey: wallet.id, publishedAt: { $ne: null } }),
     ).toBe(2);
   });
+
+  test('recovers when SQS accepted an event but the published marker failed', async () => {
+    const wallet = await new WalletService(database.orm, systemClock).create({
+      playerId: uuidv7(),
+      initialBalance: Money.from({ amount: '1.00', currency: 'BRL' }),
+    });
+    const [target] = await database.orm.em
+      .fork()
+      .execute<{ id: string }[]>(
+        'select id from outbox_messages where group_key = ? order by seq limit 1',
+        [wallet.id],
+      );
+    if (!target) throw new Error('Wallet não gerou evento na outbox');
+
+    const em = database.orm.em.fork();
+    await em.execute(`
+      create function fail_outbox_publish_mark_for_test() returns trigger language plpgsql as $$
+      begin
+        if old.id = '${target.id}'::uuid
+           and old.published_at is null
+           and new.published_at is not null then
+          raise exception 'simulated crash after SQS accepted event';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger fail_outbox_publish_mark_for_test
+        before update on outbox_messages
+        for each row execute function fail_outbox_publish_mark_for_test();
+    `);
+
+    const clock = new MutableClock(new Date('2026-11-25T12:00:00.000Z'));
+    const recordingQueue = new RecordingEventQueue(queue);
+    const firstPublisher = new OutboxPublisher(database.orm, recordingQueue, clock, 50, 30);
+    try {
+      await expect(firstPublisher.publishBatch()).rejects.toThrow(
+        'simulated crash after SQS accepted event',
+      );
+    } finally {
+      await em.execute(
+        'drop trigger if exists fail_outbox_publish_mark_for_test on outbox_messages',
+      );
+      await em.execute('drop function if exists fail_outbox_publish_mark_for_test()');
+    }
+
+    expect(recordingQueue.publishedIds).toEqual([target.id]);
+    const [afterFailedMark] = await em.execute<
+      { publishedAt: Date | null; claimToken: string | null }[]
+    >(
+      `select published_at as "publishedAt", claim_token as "claimToken"
+         from outbox_messages where id = ?`,
+      [target.id],
+    );
+    expect(afterFailedMark?.publishedAt).toBeNull();
+    expect(afterFailedMark?.claimToken).not.toBeNull();
+
+    // A new process can claim the event after the first publisher's lease expires.
+    clock.advance(30_001);
+    const secondPublisher = new OutboxPublisher(secondOrm, recordingQueue, clock, 50, 30);
+    expect(await secondPublisher.publishBatch()).toBe(1);
+    expect(recordingQueue.publishedIds).toEqual([target.id, target.id]);
+
+    const [published] = await em.execute<{ publishedAt: Date | null; claimToken: string | null }[]>(
+      `select published_at as "publishedAt", claim_token as "claimToken"
+         from outbox_messages where id = ?`,
+      [target.id],
+    );
+    expect(published?.publishedAt).not.toBeNull();
+    expect(published?.claimToken).toBeNull();
+
+    // Both sends used the same FIFO deduplication ID, so SQS exposes one copy.
+    const url = (await sqs.send(new GetQueueUrlCommand({ QueueName: queueName }))).QueueUrl;
+    if (!url) throw new Error('Fila de teste sem URL');
+    const received = await sqs.send(
+      new ReceiveMessageCommand({
+        QueueUrl: url,
+        MaxNumberOfMessages: 10,
+        WaitTimeSeconds: 1,
+        MessageSystemAttributeNames: ['MessageDeduplicationId'],
+      }),
+    );
+    const targetMessages = (received.Messages ?? []).filter(
+      (message) => (JSON.parse(message.Body ?? '{}') as { eventId?: string }).eventId === target.id,
+    );
+    expect(targetMessages).toHaveLength(1);
+    expect(targetMessages[0]?.Attributes?.MessageDeduplicationId).toBe(target.id);
+  });
 });
 
 const systemClock: Clock = { now: () => new Date() };
@@ -213,5 +300,16 @@ class FirstSendBlockingQueue implements EventQueuePort {
 
   releaseFirstSend(): void {
     this.releaseSend();
+  }
+}
+
+class RecordingEventQueue implements EventQueuePort {
+  readonly publishedIds: string[] = [];
+
+  constructor(private readonly delegate: EventQueuePort) {}
+
+  async publish(input: { eventId: string; groupKey: string; body: string }): Promise<void> {
+    await this.delegate.publish(input);
+    this.publishedIds.push(input.eventId);
   }
 }

@@ -90,29 +90,31 @@ export class SqsTransactionConsumer {
   }): Promise<boolean> {
     if (!message.body || !message.messageId || !message.receiptHandle) return false;
     let input: SubmitWagerInput | undefined;
+    let inboxMessageId: string | undefined;
     let phase: 'decode' | 'process' | 'ack' = 'decode';
     try {
       const raw: unknown = JSON.parse(message.body);
       const parsed = transactionMessageSchema.safeParse(raw);
       if (!parsed.success) throw new PermanentQueueMessageError('INVALID_PAYLOAD');
-      const correlationId = parsed.data.correlationId ?? newId();
+      inboxMessageId = parsed.data.messageId;
+      const correlationId = newId();
       input = {
-        ...parsed.data,
-        kind: parsed.data.kind,
-        money: Money.from(parsed.data.money),
+        ...parsed.data.data,
+        money: Money.from(parsed.data.data.money),
         correlationId,
       };
       phase = 'process';
       await this.transactions.submitFromQueue(input, {
         consumerName: this.consumerName,
-        messageId: message.messageId,
+        messageId: inboxMessageId,
       });
       if (this.env.FAULT === 'crash_after_commit') {
         logger.error(
           {
             component: 'sqs-transaction-consumer',
             action: 'fault-crash-after-commit',
-            messageId: message.messageId,
+            messageId: inboxMessageId,
+            sqsMessageId: message.messageId,
           },
           'fault injection: exiting after database commit and before SQS ACK',
         );
@@ -132,7 +134,8 @@ export class SqsTransactionConsumer {
         {
           component: 'sqs-transaction-consumer',
           phase,
-          messageId: message.messageId,
+          messageId: inboxMessageId ?? message.messageId,
+          ...(inboxMessageId ? { sqsMessageId: message.messageId } : {}),
           ...(input
             ? {
                 correlationId: input.correlationId,
@@ -173,7 +176,12 @@ export class SqsTransactionConsumer {
         }
       }
       if (!isPermanentInputError(error)) {
-        await this.scheduleRetry(message.receiptHandle, message.messageId, receiveCount, input);
+        await this.scheduleRetry(
+          message.receiptHandle,
+          inboxMessageId ?? message.messageId,
+          receiveCount,
+          input,
+        );
       }
       return false;
     }

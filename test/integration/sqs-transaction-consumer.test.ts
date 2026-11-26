@@ -70,8 +70,8 @@ describe('SQS transaction consumer', () => {
 
   test('processes a FIFO message, ACKs only after commit, and deduplicates a redelivery', async () => {
     const { wallet, input } = await createWalletAndInput('50.00', '12.50');
-    const body = JSON.stringify({ ...input, money: input.money.toJSON() });
-    const sent = await sendMessage(queueUrl, wallet.id, body);
+    const firstMessage = encodeTransactionMessage(input);
+    const sent = await sendMessage(queueUrl, wallet.id, firstMessage.body);
     const received = await receiveOne(queueUrl);
     expect(received?.MessageId).toBe(sent.MessageId);
     expect(received?.ReceiptHandle).toBeDefined();
@@ -90,21 +90,22 @@ describe('SQS transaction consumer', () => {
     expect(
       await database.orm.em.fork().count(InboxMessageRecord, {
         consumerName: 'consumer-it',
-        messageId: sent.MessageId,
+        messageId: firstMessage.messageId,
         processedAt: { $ne: null },
       }),
     ).toBe(1);
 
     const replay = await secondTransactions.submitFromQueue(input, {
       consumerName: 'consumer-it',
-      messageId: sent.MessageId ?? 'missing-message-id',
+      messageId: firstMessage.messageId,
     });
     expect(replay.duplicateMessage).toBe(true);
     expect(await readBalance(wallet.id)).toBe('37.50');
     expect(await receiveOne(queueUrl)).toBeUndefined();
 
-    // A second broker message with the same business idempotency key has a new SQS MessageId.
-    await sendMessage(queueUrl, wallet.id, body);
+    // A new envelope ID reaches the business idempotency layer with the same transaction key.
+    const businessReplayMessage = encodeTransactionMessage(input);
+    await sendMessage(queueUrl, wallet.id, businessReplayMessage.body);
     const businessReplay = await receiveOne(queueUrl);
     expect(
       await consumer.consumeOne({
@@ -151,8 +152,8 @@ describe('SQS transaction consumer', () => {
     let recoveryWorker: Bun.Subprocess | undefined;
     try {
       const { wallet, input } = await createWalletAndInput('50.00', '12.50');
-      const body = JSON.stringify({ ...input, money: input.money.toJSON() });
-      await sendMessage(crashQueue.queueUrl, wallet.id, body);
+      const message = encodeTransactionMessage(input);
+      await sendMessage(crashQueue.queueUrl, wallet.id, message.body);
 
       const crashingWorker = spawnConsumer(database.databaseUrl, crashQueue.queueName, true);
       expect(await waitForExit(crashingWorker, 20_000)).toBe(137);
@@ -183,8 +184,8 @@ describe('SQS transaction consumer', () => {
 
   test('ACKs a business rejection as a terminal result without changing balance', async () => {
     const { wallet, input } = await createWalletAndInput('5.00', '8.00');
-    const body = JSON.stringify({ ...input, money: input.money.toJSON() });
-    await sendMessage(queueUrl, wallet.id, body);
+    const message = encodeTransactionMessage(input);
+    await sendMessage(queueUrl, wallet.id, message.body);
     const received = await receiveOne(queueUrl);
 
     expect(
@@ -206,8 +207,8 @@ describe('SQS transaction consumer', () => {
 
   test('records FAILED after exhausted transient attempts and leaves the SQS message unacked', async () => {
     const { wallet, input } = await createWalletAndInput('20.00', '3.00');
-    const body = JSON.stringify({ ...input, money: input.money.toJSON() });
-    await sendMessage(queueUrl, wallet.id, body);
+    const message = encodeTransactionMessage(input);
+    await sendMessage(queueUrl, wallet.id, message.body);
     const received = await receiveOne(queueUrl);
     const originalSubmit = transactions.submitFromQueue.bind(transactions);
     transactions.submitFromQueue = async () => {
@@ -251,11 +252,8 @@ describe('SQS transaction consumer', () => {
       retryEnv,
     );
     const { wallet, input } = await createWalletAndInput('20.00', '3.00');
-    await sendMessage(
-      retryQueue.queueUrl,
-      wallet.id,
-      JSON.stringify({ ...input, money: input.money.toJSON() }),
-    );
+    const message = encodeTransactionMessage(input);
+    await sendMessage(retryQueue.queueUrl, wallet.id, message.body);
     const originalSubmit = transactions.submitFromQueue.bind(transactions);
     transactions.submitFromQueue = async () => {
       throw new Error('simulated transient database failure');
@@ -350,6 +348,33 @@ async function createWalletAndInput(initialBalance: string, amount: string) {
     correlationId: `correlation-${uuidv7()}`,
   };
   return { wallet, input };
+}
+
+function encodeTransactionMessage(input: SubmitWagerInput) {
+  const messageId = `provider-message-${uuidv7()}`;
+  const data = {
+    providerId: input.providerId,
+    externalTransactionId: input.externalTransactionId,
+    idempotencyKey: input.idempotencyKey,
+    playerId: input.playerId,
+    walletId: input.walletId,
+    roundId: input.roundId,
+    gameId: input.gameId,
+    kind: input.kind,
+    money: input.money.toJSON(),
+    ...(input.referenceExternalTransactionId
+      ? { referenceExternalTransactionId: input.referenceExternalTransactionId }
+      : {}),
+  };
+  return {
+    messageId,
+    body: JSON.stringify({
+      messageId,
+      type: 'WagerTransactionRequested',
+      occurredAt: new Date().toISOString(),
+      data,
+    }),
+  };
 }
 
 function databaseRef() {
