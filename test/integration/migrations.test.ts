@@ -25,11 +25,11 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
     const migrator = getOrm().migrator;
     const executed = await migrator.getStorage().executed();
     expect(await migrator.getPending()).toHaveLength(0);
-    expect(executed).toHaveLength(7);
-    expect(new Set(executed).size).toBe(7);
+    expect(executed).toHaveLength(9);
+    expect(new Set(executed).size).toBe(9);
     expect(executed).toEqual([...executed].sort());
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(7);
+    expect(await migrator.getStorage().executed()).toHaveLength(9);
   });
 
   test('down reverts one migration and down to zero removes project schema objects', async () => {
@@ -46,9 +46,9 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
         );
     }
     await migrator.down();
-    expect(await migrator.getStorage().executed()).toHaveLength(6);
+    expect(await migrator.getStorage().executed()).toHaveLength(8);
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(7);
+    expect(await migrator.getStorage().executed()).toHaveLength(9);
     const backfill = await getOrm()
       .em.getConnection()
       .execute<{ total: string; populated: string; uniqueSeqs: string; claimed: string }[]>(
@@ -68,13 +68,13 @@ describe.skipIf(!enabled)('MikroORM migrations', () => {
       .em.getConnection()
       .execute<{ proname: string }[]>(
         `select proname from pg_proc join pg_namespace on pg_namespace.oid = pg_proc.pronamespace
-       where nspname = current_schema() and proname in ('forbid_truncate','enforce_wallet_version','assert_wallet_matches_ledger','assert_transaction_matches_ledger')`,
+       where nspname = current_schema() and proname in ('forbid_truncate','enforce_wallet_version','assert_wallet_matches_ledger','assert_transaction_matches_ledger','assert_ledger_matches_transaction')`,
       );
     expect(tables).toHaveLength(0);
     expect(functions).toHaveLength(0);
     expect(await migrator.getStorage().executed()).toHaveLength(0);
 
     await migrator.up();
-    expect(await migrator.getStorage().executed()).toHaveLength(7);
+    expect(await migrator.getStorage().executed()).toHaveLength(9);
   });
 });

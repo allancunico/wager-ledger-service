@@ -19,6 +19,7 @@ import {
   WalletRecord,
 } from '../../infrastructure/persistence/records';
 import type { ApplicationMetrics } from '../observability/application-metrics';
+import { logger } from '../observability/logger';
 import type { Clock } from '../shared/clock';
 import { newId } from '../shared/ids';
 
@@ -185,19 +186,37 @@ export class WalletService {
     );
     const ledgerBalance = ledger?.balance ?? '0.00';
     const balance = record.balance;
+    const currency = record.currency.trim();
     const chainConsistent = ledger?.chainConsistent ?? true;
-    const balanceMatches = Money.from({ amount: balance, currency: record.currency.trim() }).equals(
-      Money.from({ amount: ledgerBalance, currency: record.currency.trim() }),
-    );
+    const storedBalance = Money.from({ amount: balance, currency });
+    const calculatedBalance = Money.from({ amount: ledgerBalance, currency });
+    const difference = storedBalance.subtract(calculatedBalance);
+    const balanceMatches = storedBalance.equals(calculatedBalance);
     const consistent = balanceMatches && chainConsistent;
-    if (!consistent) this.metrics?.recordReconciliationMismatch();
+    if (!consistent) {
+      this.metrics?.recordReconciliationMismatch();
+      logger.error(
+        {
+          component: 'wallet-reconciliation',
+          walletId,
+          balanceMatches,
+          chainConsistent,
+        },
+        'wallet balance and ledger disagree',
+      );
+    }
+    const entryCount = Number(ledger?.entryCount ?? '0');
     return {
       walletId,
+      storedBalance: storedBalance.toJSON(),
+      calculatedBalance: calculatedBalance.toJSON(),
+      difference: difference.toJSON(),
+      checkedEntries: entryCount,
       consistent,
       chainConsistent,
-      ledgerEntryCount: Number(ledger?.entryCount ?? '0'),
-      walletBalance: { amount: balance, currency: record.currency.trim() },
-      ledgerBalance: { amount: ledgerBalance, currency: record.currency.trim() },
+      ledgerEntryCount: entryCount,
+      walletBalance: storedBalance.toJSON(),
+      ledgerBalance: calculatedBalance.toJSON(),
       checkedAt: new Date().toISOString(),
     };
   }

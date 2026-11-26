@@ -6,6 +6,7 @@ import {
   MiddlewareConsumer,
   Module,
   type NestModule,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { OutboxPublisher, OutboxPublisherWorker } from './application/messaging/outbox-publisher';
@@ -32,6 +33,7 @@ import {
 import { CorrelationIdMiddleware } from './interfaces/http/correlation-id.middleware';
 import { MetricsController } from './interfaces/http/metrics.controller';
 import {
+  ProviderWagerTransactionController,
   WAGER_TRANSACTION_SERVICE,
   WagerTransactionController,
 } from './interfaces/http/wager-transaction.controller';
@@ -55,9 +57,13 @@ class HealthController {
 
   @Get('ready')
   async ready() {
-    await this.orm.em.fork().execute('select 1');
-    await this.transactionsQueue.checkReady();
-    return { status: 'ready' };
+    try {
+      await this.orm.em.fork().execute('select 1');
+      await this.transactionsQueue.checkReady();
+      return { status: 'ready' };
+    } catch {
+      throw new ServiceUnavailableException('Dependências indisponíveis');
+    }
   }
 }
 
@@ -69,7 +75,13 @@ class OrmLifecycle {
 }
 
 @Module({
-  controllers: [HealthController, MetricsController, WalletController, WagerTransactionController],
+  controllers: [
+    HealthController,
+    MetricsController,
+    WalletController,
+    WagerTransactionController,
+    ProviderWagerTransactionController,
+  ],
   providers: [
     { provide: ENV, useFactory: () => loadEnv() },
     { provide: ApplicationMetrics, useFactory: () => new ApplicationMetrics() },

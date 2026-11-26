@@ -22,6 +22,27 @@ import {
 } from '../../domain/shared/errors';
 import { HttpInputError } from './wager-transaction.controller';
 
+const TRANSIENT_SOCKET_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EHOSTDOWN',
+  'ENETDOWN',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+]);
+const TRANSIENT_POSTGRES_DRIVER_CODES = new Set([
+  'ERR_POSTGRES_CONNECTION_CLOSED',
+  'ERR_POSTGRES_CONNECTION_FAILED',
+  'ERR_POSTGRES_CONNECTION_REFUSED',
+  'ERR_POSTGRES_CONNECTION_TIMEOUT',
+  'ERR_POSTGRES_IDLE_TIMEOUT',
+  'ERR_POSTGRES_LIFETIME_TIMEOUT',
+]);
+
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
@@ -74,9 +95,10 @@ function mapError(error: unknown): {
           : error.message;
     return {
       status,
-      code: status === 400 ? 'INVALID_PAYLOAD' : 'HTTP_ERROR',
+      code:
+        status === 400 ? 'INVALID_PAYLOAD' : status === 503 ? 'SERVICE_UNAVAILABLE' : 'HTTP_ERROR',
       message,
-      retryable: false,
+      retryable: status === 503,
     };
   }
   if (error instanceof HttpInputError)
@@ -129,12 +151,25 @@ function mapError(error: unknown): {
   if (error instanceof DomainError)
     return { status: 500, code: error.code, message: 'Falha interna', retryable: false };
 
-  const code = findSqlState(error);
-  if (code === '55P03' || code === '40P01' || code.startsWith('08')) {
+  const sqlState = findSqlState(error);
+  const connectionCode = findConnectionErrorCode(error);
+  if (
+    sqlState === '55P03' ||
+    sqlState === '40P01' ||
+    sqlState.startsWith('08') ||
+    sqlState === '57P01' ||
+    sqlState === '57P02' ||
+    sqlState === '57P03' ||
+    connectionCode !== undefined
+  ) {
     return {
       status: 503,
       code:
-        code === '55P03' ? 'LOCK_TIMEOUT' : code === '40P01' ? 'DEADLOCK' : 'DATABASE_UNAVAILABLE',
+        sqlState === '55P03'
+          ? 'LOCK_TIMEOUT'
+          : sqlState === '40P01'
+            ? 'DEADLOCK'
+            : 'DATABASE_UNAVAILABLE',
       message: 'Serviço temporariamente indisponível',
       retryable: true,
     };
@@ -143,18 +178,42 @@ function mapError(error: unknown): {
 }
 
 function findSqlState(error: unknown): string {
-  let current: unknown = error;
+  return getNestedErrorCodes(error).find((code) => /^[0-9A-Z]{5}$/.test(code)) ?? '';
+}
+
+/**
+ * Node's `pg` driver reports socket codes (for example ECONNREFUSED); Bun's PostgreSQL client
+ * uses ERR_POSTGRES_CONNECTION_* codes. Both represent infrastructure outages to API callers.
+ */
+function findConnectionErrorCode(error: unknown): string | undefined {
+  return getNestedErrorCodes(error).find(
+    (code) => TRANSIENT_SOCKET_ERROR_CODES.has(code) || TRANSIENT_POSTGRES_DRIVER_CODES.has(code),
+  );
+}
+
+function getNestedErrorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  const pending: unknown[] = [error];
   const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
     seen.add(current);
+
     const candidate = current as {
       code?: unknown;
+      errno?: unknown;
+      sqlState?: unknown;
       cause?: unknown;
       driverException?: unknown;
       originalError?: unknown;
     };
-    if (typeof candidate.code === 'string') return candidate.code;
-    current = candidate.cause ?? candidate.driverException ?? candidate.originalError;
+    for (const value of [candidate.code, candidate.errno, candidate.sqlState]) {
+      if (typeof value === 'string') codes.push(value);
+    }
+    pending.push(candidate.cause, candidate.driverException, candidate.originalError);
   }
-  return '';
+
+  return codes;
 }

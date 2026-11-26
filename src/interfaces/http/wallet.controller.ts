@@ -73,6 +73,8 @@ export class WalletController {
 
 export function walletView(wallet: import('../../domain/wallet/wallet').Wallet) {
   return {
+    id: wallet.id,
+    /** Backward-compatible alias; the challenge contract names this field `id`. */
     walletId: wallet.id,
     playerId: wallet.playerId,
     balance: wallet.balance.toJSON(),

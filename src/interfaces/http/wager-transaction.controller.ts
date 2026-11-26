@@ -27,7 +27,7 @@ const transactionSchema = z.strictObject({
 });
 const transactionIdSchema = z.uuid();
 
-@Controller('transactions')
+@Controller(['transactions', 'wagering/transactions'])
 export class WagerTransactionController {
   constructor(
     @Inject(WAGER_TRANSACTION_SERVICE) private readonly transactions: WagerTransactionService,
@@ -80,6 +80,29 @@ export class WagerTransactionController {
     const parsedId = transactionIdSchema.safeParse(transactionId);
     if (!parsedId.success) throw new HttpInputError(parsedId.error.issues);
     return response.status(200).json(await this.transactions.getById(transactionId));
+  }
+}
+
+/** Challenge-compatible lookup path, while the original route remains available as an alias. */
+@Controller('providers/:providerId/wagering/transactions')
+export class ProviderWagerTransactionController {
+  constructor(
+    @Inject(WAGER_TRANSACTION_SERVICE) private readonly transactions: WagerTransactionService,
+  ) {}
+
+  @Get(':externalTransactionId')
+  async getByExternalId(
+    @Param('providerId') providerId: string,
+    @Param('externalTransactionId') externalTransactionId: string,
+    @Res() response: Response,
+  ) {
+    const parsedProvider = z.string().min(1).max(255).safeParse(providerId);
+    const parsedExternalId = z.string().min(1).max(255).safeParse(externalTransactionId);
+    if (!parsedProvider.success) throw new HttpInputError(parsedProvider.error.issues);
+    if (!parsedExternalId.success) throw new HttpInputError(parsedExternalId.error.issues);
+    return response
+      .status(200)
+      .json(await this.transactions.getByExternalId(providerId, externalTransactionId));
   }
 }
 

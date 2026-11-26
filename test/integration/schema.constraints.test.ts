@@ -167,6 +167,41 @@ describe.skipIf(!enabled)('PostgreSQL schema constraints', () => {
     );
   });
 
+  test('ledger entries must use their transaction wallet and financial direction', async () => {
+    const em = getOrm().em;
+    const firstWalletId = await em.transactional((tx) => insertWallet(tx));
+    const otherWalletId = await em.transactional((tx) => insertWallet(tx));
+    const transactionId = await em.transactional((tx) => insertTransaction(tx, firstWalletId));
+
+    await expectDatabaseFailure(() =>
+      em.transactional((tx) =>
+        insertLedger(tx, otherWalletId, transactionId, {
+          direction: 'CREDIT',
+          before: '0.00',
+          after: '1.00',
+        }),
+      ),
+    );
+
+    await expectDatabaseFailure(() =>
+      em.transactional(async (tx) => {
+        await tx.execute(
+          "update wager_transactions set status = 'PROCESSED', resolved_at = now(), balance_snapshot = '1.00', balance_snapshot_currency = 'BRL' where id = ?",
+          [transactionId],
+        );
+        await tx.execute('update wallets set balance = ?, version = version + 1 where id = ?', [
+          '1.00',
+          firstWalletId,
+        ]);
+        await insertLedger(tx, firstWalletId, transactionId, {
+          direction: 'CREDIT',
+          before: '0.00',
+          after: '1.00',
+        });
+      }),
+    );
+  });
+
   test('allows one processed reversal of each kind per reference, but not duplicates of a kind', async () => {
     const em = getOrm().em;
     const rollbackMarker = new Error('rollback intentionally to avoid deferred ledger checks');
@@ -245,7 +280,9 @@ describe.skipIf(!enabled)('PostgreSQL schema constraints', () => {
   test('ledger rejects arithmetic and chain breaks, and blocks updates and truncation', async () => {
     const em = getOrm().em;
     const walletId = await em.transactional((tx) => insertWallet(tx));
-    const transactionId = await em.transactional((tx) => insertTransaction(tx, walletId));
+    const transactionId = await em.transactional((tx) =>
+      insertTransaction(tx, walletId, { kind: 'WIN' }),
+    );
     await em.transactional(async (tx) => {
       await tx.execute(
         "update wager_transactions set status = 'PROCESSED', resolved_at = now(), balance_snapshot = '1.00', balance_snapshot_currency = 'BRL' where id = ?",

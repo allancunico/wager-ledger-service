@@ -17,6 +17,7 @@ import {
   WagerTransactionService,
   WalletMissingError,
 } from '../../application/wagering/wager-transaction-service';
+import { computeBackoffMs } from '../../domain/shared/backoff';
 import { DomainError } from '../../domain/shared/errors';
 import { Money } from '../../domain/shared/money';
 import { transactionMessageSchema } from '../../interfaces/messaging/transaction-message';
@@ -155,6 +156,9 @@ export class SqsTransactionConsumer {
           );
         }
       }
+      if (!isPermanentInputError(error)) {
+        await this.scheduleRetry(message.receiptHandle, message.messageId, receiveCount);
+      }
       return false;
     }
   }
@@ -210,6 +214,34 @@ export class SqsTransactionConsumer {
         throw error;
       });
     return this.queueUrlPromise;
+  }
+
+  private async scheduleRetry(receiptHandle: string, messageId: string, receiveCount: number) {
+    const delayMs = computeBackoffMs(Math.max(0, receiveCount - 1), {
+      baseSeconds: this.env.SQS_RETRY_BACKOFF_BASE_SECONDS,
+      maxSeconds: this.env.SQS_RETRY_BACKOFF_MAX_SECONDS,
+      jitterRatio: 0,
+    });
+    const visibilityTimeout = Math.min(43_200, Math.max(1, Math.ceil(delayMs / 1000)));
+    try {
+      await this.client.send(
+        new ChangeMessageVisibilityCommand({
+          QueueUrl: await this.getQueueUrl(),
+          ReceiptHandle: receiptHandle,
+          VisibilityTimeout: visibilityTimeout,
+        }),
+      );
+    } catch (error) {
+      logger.warn(
+        {
+          component: 'sqs-transaction-consumer',
+          action: 'schedule-retry-failed',
+          messageId,
+          error: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'could not set SQS retry visibility timeout; queue default will apply',
+      );
+    }
   }
 
   private async release(messages: { ReceiptHandle?: string }[]): Promise<void> {

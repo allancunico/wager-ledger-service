@@ -235,6 +235,59 @@ describe('SQS transaction consumer', () => {
     expect(await readBalance(wallet.id)).toBe('20.00');
   }, 10_000);
 
+  test('increases visibility timeout exponentially for transient failures', async () => {
+    const retryQueue = await createFifoQueuePair(sqs, 'retry-backoff-it', 5, 5);
+    const retryEnv = loadEnv({
+      ...process.env,
+      SQS_TRANSACTIONS_QUEUE: retryQueue.queueName,
+      SQS_RETRY_BACKOFF_BASE_SECONDS: '2',
+      SQS_RETRY_BACKOFF_MAX_SECONDS: '4',
+    });
+    const retryConsumer = new SqsTransactionConsumer(
+      sqs,
+      retryQueue.queueName,
+      'consumer-retry-backoff-it',
+      transactions,
+      retryEnv,
+    );
+    const { wallet, input } = await createWalletAndInput('20.00', '3.00');
+    await sendMessage(
+      retryQueue.queueUrl,
+      wallet.id,
+      JSON.stringify({ ...input, money: input.money.toJSON() }),
+    );
+    const originalSubmit = transactions.submitFromQueue.bind(transactions);
+    transactions.submitFromQueue = async () => {
+      throw new Error('simulated transient database failure');
+    };
+
+    try {
+      let received = await receiveOne(retryQueue.queueUrl);
+      for (const { receiveCount, delayMs } of [
+        { receiveCount: 1, delayMs: 2_000 },
+        { receiveCount: 2, delayMs: 4_000 },
+      ]) {
+        expect(received?.Attributes?.ApproximateReceiveCount).toBe(String(receiveCount));
+        expect(
+          await retryConsumer.consumeOne({
+            body: received?.Body,
+            messageId: received?.MessageId,
+            receiptHandle: received?.ReceiptHandle,
+            attributes: received?.Attributes,
+          }),
+        ).toBe(false);
+        expect(await receiveOne(retryQueue.queueUrl)).toBeUndefined();
+        await Bun.sleep(delayMs + 300);
+        received = await receiveOne(retryQueue.queueUrl);
+      }
+      expect(received?.Attributes?.ApproximateReceiveCount).toBe('3');
+    } finally {
+      transactions.submitFromQueue = originalSubmit;
+      await deleteQueueIfPresent(sqs, retryQueue.queueName);
+      await deleteQueueIfPresent(sqs, retryQueue.dlqName);
+    }
+  }, 20_000);
+
   test('redrives malformed JSON to the DLQ after the queue receive limit', async () => {
     const malformedQueue = await createFifoQueuePair(sqs, 'invalid-it', 2, 0);
     try {

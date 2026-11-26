@@ -7,16 +7,15 @@ import { createTestDatabase } from '../integration/helpers/database';
 describe('HTTP concurrency across service processes', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   const children: Bun.Subprocess[] = [];
-  let ports: [number, number];
+  let ports: number[];
 
   beforeAll(async () => {
     database = await createTestDatabase();
-    const firstPort = randomPort();
-    let secondPort = randomPort();
-    while (secondPort === firstPort) secondPort = randomPort();
-    ports = [firstPort, secondPort];
-    children.push(await startApi(ports[0], database.databaseUrl));
-    children.push(await startApi(ports[1], database.databaseUrl));
+    ports = Array.from({ length: 3 }, () => randomPort());
+    while (new Set(ports).size !== 3) ports = Array.from({ length: 3 }, () => randomPort());
+    children.push(
+      ...(await Promise.all(ports.map((port) => startApi(port, database.databaseUrl)))),
+    );
   }, 45_000);
 
   afterAll(async () => {
@@ -27,15 +26,15 @@ describe('HTTP concurrency across service processes', () => {
     await database?.close();
   });
 
-  test('two HTTP processes serialize competing debits on one wallet', async () => {
+  test('three HTTP processes serialize competing debits on one wallet', async () => {
     const playerId = uuidv7();
     const wallet = await new WalletService(database.orm, { now: () => new Date() }).create({
       playerId,
       initialBalance: Money.from({ amount: '100.00', currency: 'BRL' }),
     });
-    const requests = [0, 1].map((index) => {
+    const requests = ports.map((port) => {
       const externalTransactionId = `process-${uuidv7()}`;
-      return fetch(`http://127.0.0.1:${ports[index]}/transactions`, {
+      return fetch(`http://127.0.0.1:${port}/transactions`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -54,7 +53,7 @@ describe('HTTP concurrency across service processes', () => {
       });
     });
     const responses = await Promise.all(requests);
-    expect(responses.map((response) => response.status).sort()).toEqual([201, 422]);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 422, 422]);
 
     const finalWallet = await database.orm.em
       .fork()

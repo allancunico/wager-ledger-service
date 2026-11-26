@@ -111,18 +111,19 @@ describe('evaluate: WIN e LOSS', () => {
     ).toEqual(pending('REFERENCE_MISSING'));
   });
 
-  test('WIN e LOSS só referenciam BET', () => {
-    for (const kind of [Win, Loss]) {
-      const tx = makeTx({ kind, referenceExternalTransactionId: REF });
-      expect(
-        evaluate({
-          transaction: tx,
-          wallet: wallet(),
-          reference: processedRef(Win),
-          referenceAlreadyReversed: false,
-        }),
-      ).toEqual(reject(FailureCode.ReferenceKindNotAllowed));
-    }
+  test('WIN só referencia BET; LOSS não aceita referência', () => {
+    const win = makeTx({ kind: Win, referenceExternalTransactionId: REF });
+    expect(
+      evaluate({
+        transaction: win,
+        wallet: wallet(),
+        reference: processedRef(Win),
+        referenceAlreadyReversed: false,
+      }),
+    ).toEqual(reject(FailureCode.ReferenceKindNotAllowed));
+    expect(() => makeTx({ kind: Loss, referenceExternalTransactionId: REF })).toThrow(
+      'LOSS não aceita referência',
+    );
   });
 
   test('a BET referenciada por um WIN já revertida não impede o WIN (WIN não é reversão)', () => {
@@ -858,11 +859,7 @@ describe('processTransaction: invariante saldo == ledger numa sequência mista',
         }),
         '70.00',
       ],
-      [
-        'LOSS',
-        makeTx({ kind: Loss, externalTransactionId: 'l1', referenceExternalTransactionId: 'b1' }),
-        '70.00',
-      ],
+      ['LOSS', makeTx({ kind: Loss, externalTransactionId: 'l1' }), '70.00'],
       [
         'ROLLBACK r1 (de um REFUND)',
         makeTx({

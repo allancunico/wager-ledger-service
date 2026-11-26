@@ -11,31 +11,38 @@ const rolesSchema = z
   )
   .pipe(z.array(z.enum(['api', 'consumer', 'workers'])).min(1));
 
-const envSchema = z.object({
-  ROLES: rolesSchema,
-  PORT: z.coerce.number().int().positive().default(3000),
-  DATABASE_URL: z.string().min(1),
-  AWS_REGION: z.string().default('us-east-1'),
-  AWS_ENDPOINT_URL: z.string().optional(),
-  AWS_ACCESS_KEY_ID: z.string().optional(),
-  AWS_SECRET_ACCESS_KEY: z.string().optional(),
-  SQS_TRANSACTIONS_QUEUE: z.string().default('wager-transactions.fifo'),
-  SQS_TRANSACTIONS_DLQ: z.string().default('wager-transactions-dlq.fifo'),
-  SQS_CONSUMER_NAME: z.string().min(1).max(255).default('wager-transactions-v1'),
-  SQS_CONSUMER_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(10),
-  SQS_CONSUMER_WAIT_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
-  SQS_MAX_RECEIVE_COUNT: z.coerce.number().int().positive().default(5),
-  SQS_EVENTS_QUEUE: z.string().default('wager-events.fifo'),
-  LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
-  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
-  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
-  PENDING_REFERENCE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
-  PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
-  PENDING_REFERENCE_BACKOFF_BASE_SECONDS: z.coerce.number().positive().default(5),
-  PENDING_REFERENCE_BACKOFF_MAX_SECONDS: z.coerce.number().positive().default(300),
-  FAULT: z.enum(['crash_after_commit']).optional(),
-});
+const envSchema = z
+  .object({
+    ROLES: rolesSchema,
+    PORT: z.coerce.number().int().positive().default(3000),
+    DATABASE_URL: z.string().min(1),
+    AWS_REGION: z.string().default('us-east-1'),
+    AWS_ENDPOINT_URL: z.string().optional(),
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
+    SQS_TRANSACTIONS_QUEUE: z.string().default('wager-transactions.fifo'),
+    SQS_TRANSACTIONS_DLQ: z.string().default('wager-transactions-dlq.fifo'),
+    SQS_CONSUMER_NAME: z.string().min(1).max(255).default('wager-transactions-v1'),
+    SQS_CONSUMER_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(10),
+    SQS_CONSUMER_WAIT_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
+    SQS_MAX_RECEIVE_COUNT: z.coerce.number().int().positive().default(5),
+    SQS_RETRY_BACKOFF_BASE_SECONDS: z.coerce.number().int().positive().default(1),
+    SQS_RETRY_BACKOFF_MAX_SECONDS: z.coerce.number().int().positive().max(43_200).default(30),
+    SQS_EVENTS_QUEUE: z.string().default('wager-events.fifo'),
+    LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
+    OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
+    WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+    PENDING_REFERENCE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+    PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
+    PENDING_REFERENCE_BACKOFF_BASE_SECONDS: z.coerce.number().positive().default(5),
+    PENDING_REFERENCE_BACKOFF_MAX_SECONDS: z.coerce.number().positive().default(300),
+    FAULT: z.enum(['crash_after_commit']).optional(),
+  })
+  .refine((value) => value.SQS_RETRY_BACKOFF_MAX_SECONDS >= value.SQS_RETRY_BACKOFF_BASE_SECONDS, {
+    path: ['SQS_RETRY_BACKOFF_MAX_SECONDS'],
+    message: 'deve ser maior ou igual a SQS_RETRY_BACKOFF_BASE_SECONDS',
+  });
 
 export type Env = z.infer<typeof envSchema>;
 export type Role = Env['ROLES'][number];
