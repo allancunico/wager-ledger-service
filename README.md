@@ -34,7 +34,7 @@ O PostgreSQL do Compose é publicado em `localhost:5433` para evitar conflito co
 | `bun run infra:up` / `infra:down` | sobe / derruba a infra local |
 | `bun run test:unit` | testes unitários do domínio e round-trip dos mappers (não precisam de banco nem de Docker) |
 | `bun run test:integration` | testes de migrations e constraints em PostgreSQL (criam e removem um banco temporário) |
-| `bun run test:concurrency` | testes de concorrência (etapa 5 em diante) |
+| `bun run test:concurrency` | concorrência no PostgreSQL entre instâncias independentes do serviço |
 | `bun run migrate:up` | aplica as migrations |
 | `bun run migrate:down` | reverte a migration mais recente |
 | `bun run migrate:down -- --all` | reverte todas as migrations |
@@ -71,7 +71,7 @@ Idempotency-Key: provedor-123
 
 Consultas disponíveis: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`. Erros usam `application/problem+json`. A autenticação está desligada pelo adaptador no-op.
 
-Os workers SQS e os testes de concorrência multi-instância pertencem às etapas seguintes.
+Os workers SQS e os testes de concorrência entre processos/instâncias HTTP pertencem às etapas seguintes.
 
 ## Papéis do processo
 

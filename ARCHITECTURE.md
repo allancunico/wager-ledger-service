@@ -264,7 +264,7 @@ Migrations versionadas e reversíveis (Migrator do MikroORM), com SQL escrito à
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
 
-Estado do clone: as etapas 1 a 4 estão implementadas; as etapas 5 a 10 permanecem no plano.
+Estado do clone: as etapas 1 a 5 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL. Concorrência entre processos HTTP fica para a etapa 9; as etapas 6 a 10 permanecem no plano.
 
 ## 10. Limitações conhecidas
 
@@ -397,3 +397,9 @@ Validação em 25/11/2026: `bun run test:integration` executou migrations, const
 - `GET /health/live` não acessa dependências; `GET /health/ready` confirma conexão com PostgreSQL.
 - Erros seguem `application/problem+json`, incluem `code`, `message` e `retryable`; lock timeout e deadlock viram 503 com `Retry-After`.
 - As migrations são aplicadas explicitamente com `bun run migrate:up` antes de iniciar a API. O guard de identidade está configurado com adaptador no-op.
+
+## 15. Concorrência no PostgreSQL (etapa 5)
+
+`bun run test:concurrency` cria um banco temporário e usa dois ORMs independentes para representar instâncias concorrentes do serviço. O teste confirma que duas apostas de 80.00 contra saldo 100.00 produzem um processamento e uma rejeição, sem saldo negativo, e que oito entregas paralelas da mesma operação produzem um único débito, uma transação e seus eventos de outbox. A suíte também reconcilia saldo e cadeia do ledger após as disputas.
+
+Durante a validação foi corrigida uma corrida no caminho rápido de deduplicação: se a transação externa aparecia entre as consultas da chave idempotente e do id externo, a mesma chave era classificada incorretamente como conflito. Agora ela passa pela comparação de hash e retorna replay.

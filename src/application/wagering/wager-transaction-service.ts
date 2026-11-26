@@ -106,7 +106,12 @@ export class WagerTransactionService {
         providerId: input.providerId,
         externalTransactionId: input.externalTransactionId,
       });
-      if (byExternalId) throw new ExternalTransactionConflictError();
+      if (byExternalId) {
+        if (byExternalId.idempotencyKey === input.idempotencyKey) {
+          return this.replay(byExternalId, payloadHash);
+        }
+        throw new ExternalTransactionConflictError();
+      }
 
       await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
       // Acquire the wallet lock before inserting the FK-backed transaction row. This avoids
