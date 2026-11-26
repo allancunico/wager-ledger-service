@@ -10,6 +10,7 @@ import {
 import { APP_GUARD } from '@nestjs/core';
 import { OutboxPublisher, OutboxPublisherWorker } from './application/messaging/outbox-publisher';
 import { SYSTEM_CLOCK } from './application/shared/clock';
+import { PendingReferenceWorker } from './application/wagering/pending-reference-worker';
 import { WagerTransactionService } from './application/wagering/wager-transaction-service';
 import { WalletService } from './application/wallets/wallet-service';
 import type { Env } from './infrastructure/config/env';
@@ -86,6 +87,12 @@ class OrmLifecycle {
       useFactory: (publisher: OutboxPublisher, env: Env) =>
         new OutboxPublisherWorker(publisher, env),
       inject: [OutboxPublisher, ENV],
+    },
+    {
+      provide: PendingReferenceWorker,
+      useFactory: (service: WagerTransactionService, env: Env) =>
+        new PendingReferenceWorker(service, env),
+      inject: [WAGER_TRANSACTION_SERVICE, ENV],
     },
     {
       provide: SqsTransactionConsumer,

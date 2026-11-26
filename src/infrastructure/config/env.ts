@@ -31,6 +31,7 @@ const envSchema = z.object({
   OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
   PENDING_REFERENCE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+  PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
   PENDING_REFERENCE_BACKOFF_BASE_SECONDS: z.coerce.number().positive().default(5),
   PENDING_REFERENCE_BACKOFF_MAX_SECONDS: z.coerce.number().positive().default(300),
   FAULT: z.enum(['crash_after_commit']).optional(),

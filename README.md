@@ -71,7 +71,7 @@ Idempotency-Key: provedor-123
 
 Consultas disponíveis: `GET /wallets/:id`, `GET /wallets/:id/ledger?limit=50&cursor=...`, `POST /wallets/:id/reconciliation`, `GET /transactions/:id` e `GET /transactions/by-external/:providerId/:externalTransactionId`. Erros usam `application/problem+json`. A autenticação está desligada pelo adaptador no-op.
 
-O publisher de eventos usa o papel `workers` e envia para a fila FIFO configurada. O consumidor de entrada usa o papel `consumer`, lê `wager-transactions.fifo` e espera corpos JSON com os campos da API mais `idempotencyKey` no corpo (a mensagem SQS fornece o `messageId`). Inbox e efeitos financeiros são confirmados na mesma transação PostgreSQL; a mensagem só é apagada depois do commit. Falhas não apagadas são repetidas pelo visibility timeout e a redrive policy encaminha mensagens para a DLQ após cinco entregas. O worker de `PENDING_REFERENCE` e os testes de concorrência entre processos HTTP pertencem às próximas etapas.
+O publisher de eventos e o worker de `PENDING_REFERENCE` usam o papel `workers`. O consumidor de entrada usa o papel `consumer`, lê `wager-transactions.fifo` e espera corpos JSON com os campos da API mais `idempotencyKey` no corpo (a mensagem SQS fornece o `messageId`). Inbox e efeitos financeiros são confirmados na mesma transação PostgreSQL; a mensagem só é apagada depois do commit. Falhas não apagadas são repetidas pelo visibility timeout e a redrive policy encaminha mensagens para a DLQ após cinco entregas. O reprocessador de referências usa `FOR UPDATE SKIP LOCKED`, TTL/backoff configuráveis e o mesmo processamento financeiro da entrada original. Testes de concorrência entre processos HTTP pertencem à próxima etapa.
 
 ## Papéis do processo
 
@@ -79,7 +79,7 @@ Um mesmo código sobe até três papéis, escolhidos por `ROLES` (separados por 
 
 - `api`: API HTTP
 - `consumer`: consumidor da fila `wager-transactions.fifo`
-- `workers`: publisher da outbox (reprocessador de `PENDING_REFERENCE` entra em etapa posterior)
+- `workers`: publisher da outbox e reprocessador de `PENDING_REFERENCE`
 
 ```bash
 ROLES=api PORT=3101 bun run start

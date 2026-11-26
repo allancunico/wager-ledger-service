@@ -156,6 +156,7 @@ PENDING_REFERENCE --> PROCESSED | REJECTED | FAILED
 
 - O TTL é usado em vez de número de tentativas porque o que importa ao provedor é por quanto tempo esperamos.
 - `WagerTransactionPendingReference` sai uma vez, na entrada no estado.
+- O worker busca itens vencidos em lotes configuráveis, processa cada item numa transação própria e usa `FOR UPDATE SKIP LOCKED`. Sob o lock da wallet, reavalia a referência pelas mesmas regras do caso de uso original, atualiza saldo/ledger/outbox atomicamente e agenda o próximo backoff quando ainda deve esperar.
 - Todos os valores são configuráveis. Os testes usam TTL de segundos com `Clock` injetável.
 - A corrida referência × dependente não perde nada: ambas disputam o lock da mesma wallet, e o worker é a rede de segurança.
 - Fora do escopo: reprocessar as dependentes imediatamente ao processar a referência (otimização de latência).
@@ -267,7 +268,7 @@ Contrato implementado: JSON com os mesmos campos de negócio do `POST /transacti
 
 Cortado: `test:load` (só se sobrar tempo). Enxuto: métricas no mínimo exigido, sem Swagger e sem OpenTelemetry. Documentação escrita conforme o avanço.
 
-Estado do clone: as etapas 1 a 7 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, a etapa 6 publica outbox no SQS FIFO e a etapa 7 consome transações da fila com inbox transacional. Concorrência entre processos HTTP fica para a etapa 9; as etapas 8 a 10 permanecem no plano.
+Estado do clone: as etapas 1 a 8 estão implementadas; a etapa 5 tem testes de concorrência entre instâncias independentes do serviço no mesmo PostgreSQL, a etapa 6 publica outbox no SQS FIFO, a etapa 7 consome transações da fila com inbox transacional e a etapa 8 reprocessa referências pendentes com `SKIP LOCKED`. Concorrência entre processos HTTP fica para a etapa 9; as etapas 9 e 10 permanecem no plano.
 
 ## 10. Limitações conhecidas
 
